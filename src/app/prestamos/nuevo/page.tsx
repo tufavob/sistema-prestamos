@@ -438,7 +438,6 @@ export default function NuevoPrestamo() {
               <input
                 id="fechaInicio"
                 type="date"
-                min={aYMD(hoyLocal())}
                 className={inputCls}
                 value={fechaInicio}
                 onChange={(e) => {
@@ -540,17 +539,15 @@ export default function NuevoPrestamo() {
                 </span>
               </h3>
               <div className="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700">
-                <table className="w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-zinc-200 bg-zinc-50 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-400">
-                      <th className="px-3 py-2.5 font-semibold">#</th>
-                      <th className="px-3 py-2.5 font-semibold">Fecha</th>
-                      <th className="px-3 py-2.5 text-right font-semibold">Monto</th>
-                    </tr>
-                  </thead>
-                </table>
                 <div className="max-h-72 overflow-y-auto">
                   <table className="w-full text-left text-sm">
+                    <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-800/60">
+                      <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+                        <th className="px-3 py-2.5 font-semibold">#</th>
+                        <th className="px-3 py-2.5 font-semibold">Fecha</th>
+                        <th className="px-3 py-2.5 text-right font-semibold">Monto</th>
+                      </tr>
+                    </thead>
                     <tbody>
                       {calculo.cuotas.map((c) => (
                         <tr
