@@ -26,6 +26,7 @@ type ResultadoDashboard = {
   hoy: string;
   totalPrestamos: number;
   capitalEnCalle: number;
+  totalPorCobrar: number;
   recaudoHoy: number;
   gananciaProyectada: number;
   gananciaRealCobrada: number;
@@ -33,7 +34,7 @@ type ResultadoDashboard = {
 };
 
 type RawCliente = { id: string; nombres: string; apellidos: string };
-type RawPrestamo = { monto: number; numero_cuotas: number };
+type RawPrestamo = { monto: number; numero_cuotas: number; saldo_pendiente: number };
 type RawCuota = { monto: number; prestamos: RawPrestamo | RawPrestamo[] | null };
 type RawPago = { monto: number; cuotas: RawCuota | RawCuota[] | null };
 type RawPreMora = { clientes: RawCliente | RawCliente[] | null };
@@ -75,7 +76,7 @@ export default function Dashboard() {
         supabase.from("pagos").select("monto").eq("fecha_pago", hoy),
         supabase
           .from("pagos")
-          .select("monto, cuotas!inner(monto, prestamos!inner(monto, numero_cuotas))"),
+          .select("monto, cuotas!inner(monto, prestamos!inner(monto, numero_cuotas, saldo_pendiente))"),
         supabase
           .from("cuotas")
           .select(
@@ -97,6 +98,7 @@ export default function Dashboard() {
         hoy,
         totalPrestamos: 0,
         capitalEnCalle: 0,
+        totalPorCobrar: 0,
         recaudoHoy: 0,
         gananciaProyectada: 0,
         gananciaRealCobrada: 0,
@@ -110,7 +112,11 @@ export default function Dashboard() {
       saldo_pendiente: number;
     }[];
 
-    const capitalEnCalle = prestamos.reduce(
+    const montoInicialActivo = prestamos.reduce(
+      (s, p) => s + Number(p.monto),
+      0,
+    );
+    const totalPorCobrar = prestamos.reduce(
       (s, p) => s + Number(p.saldo_pendiente),
       0,
     );
@@ -124,18 +130,26 @@ export default function Dashboard() {
       0,
     );
 
-    const gananciaRealCobrada = (
-      (pagosInteresRes.data ?? []) as unknown as RawPago[]
-    ).reduce((s, p) => {
+    const pagos = (pagosInteresRes.data ?? []) as unknown as RawPago[];
+    let capitalRecuperado = 0;
+    let gananciaRealCobrada = 0;
+    for (const p of pagos) {
       const cuota = primero(p.cuotas);
       const prestamo = cuota ? primero(cuota.prestamos) : null;
-      if (!cuota || !prestamo) return s;
+      if (!cuota || !prestamo) continue;
       const cuotaMonto = Number(cuota.monto);
-      if (cuotaMonto <= 0) return s;
-      const principalCuota = Number(prestamo.monto) / Number(prestamo.numero_cuotas);
-      const interesCuota = cuotaMonto - principalCuota;
-      return s + Number(p.monto) * (interesCuota / cuotaMonto);
-    }, 0);
+      if (cuotaMonto <= 0) continue;
+      const principalCuota =
+        Number(prestamo.monto) / Number(prestamo.numero_cuotas);
+      const montoPago = Number(p.monto);
+      const pctPrincipal = principalCuota / cuotaMonto;
+      if (Number(prestamo.saldo_pendiente) > 0) {
+        capitalRecuperado += montoPago * pctPrincipal;
+      }
+      gananciaRealCobrada += montoPago * (1 - pctPrincipal);
+    }
+
+    const capitalEnCalle = montoInicialActivo - capitalRecuperado;
 
     const moraMap = new Map<string, MoraCliente>();
     for (const raw of (cuotasMoraRes.data ?? []) as unknown as RawCuotaMora[]) {
@@ -170,6 +184,7 @@ export default function Dashboard() {
       hoy,
       totalPrestamos: prestamos.length,
       capitalEnCalle,
+      totalPorCobrar,
       recaudoHoy,
       gananciaProyectada,
       gananciaRealCobrada,
@@ -277,11 +292,11 @@ export default function Dashboard() {
       {/* Métricas principales */}
       <section
         aria-label="Métricas principales"
-        className="grid grid-cols-2 gap-3 lg:grid-cols-4"
+        className="grid grid-cols-2 gap-3 lg:grid-cols-5"
       >
         {cargando || !datos ? (
           <>
-            {[0, 1, 2, 3].map((i) => (
+            {[0, 1, 2, 3, 4].map((i) => (
               <div
                 key={i}
                 className="h-32 animate-pulse rounded-2xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900"
@@ -299,6 +314,18 @@ export default function Dashboard() {
               </p>
               <p className="mt-1 text-xs opacity-70">
                 {datos.totalPrestamos} préstamos activos
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-sky-200 bg-sky-50 p-5 dark:border-sky-900 dark:bg-sky-950">
+              <p className="text-xs font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                Total por cobrar
+              </p>
+              <p className="mt-1 truncate text-2xl font-bold text-sky-700 dark:text-sky-300">
+                {formatearMoneda(datos.totalPorCobrar)}
+              </p>
+              <p className="mt-1 truncate text-xs text-sky-600 dark:text-sky-400">
+                Capital + intereses pendientes
               </p>
             </div>
 

@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 const ENLACES = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/", label: "Clientes" },
-  { href: "/prestamos/nuevo", label: "Préstamos" },
+  { href: "/prestamos", label: "Préstamos" },
   { href: "/cobros", label: "Cobros del Día" },
 ];
 

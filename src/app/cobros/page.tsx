@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { aYMD, formatearMoneda, hoyLocal } from "@/lib/prestamos";
-import { crearLinkWhatsApp, mensajeComprobante } from "@/lib/whatsapp";
+import { crearLinkWhatsApp, mensajeComprobante, mensajeRecordatorio } from "@/lib/whatsapp";
 import {
   exportarPagosCSV,
   SELECT_PAGOS_REPORTE,
@@ -580,15 +580,36 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                         </p>
                       )}
                     </div>
-                    <span
-                      className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
-                        vencida
-                          ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
-                          : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                      }`}
-                    >
-                      {vencida ? "Vencida" : "Hoy"}
-                    </span>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {cliente?.telefono && (
+                        <a
+                          href={crearLinkWhatsApp(
+                            cliente.telefono,
+                            mensajeRecordatorio({
+                              nombres: nombreCompleto(cliente),
+                              numeroCuota: c.numero,
+                              monto,
+                            }),
+                          )}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-label="Enviar recordatorio por WhatsApp"
+                          title="Enviar recordatorio por WhatsApp"
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-white transition hover:bg-emerald-700"
+                        >
+                          <WhatsAppIcon className="h-3.5 w-3.5" />
+                        </a>
+                      )}
+                      <span
+                        className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+                          vencida
+                            ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+                            : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                        }`}
+                      >
+                        {vencida ? "Vencida" : "Hoy"}
+                      </span>
+                    </div>
                   </div>
                 )}
 
