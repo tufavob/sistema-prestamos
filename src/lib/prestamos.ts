@@ -68,7 +68,7 @@ export function calcularPrestamo(
 }
 
 export const formatearMoneda = (n: number) =>
-  `$ ${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  `S/ ${n.toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export const formatearFecha = (fecha: Date) =>
   fecha.toLocaleDateString("es-PE", {
