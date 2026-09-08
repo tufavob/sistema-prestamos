@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { aYMD, formatearMoneda, FRECUENCIAS, hoyLocal, type Frecuencia } from "@/lib/prestamos";
 import { crearLinkWhatsApp, mensajeRecordatorio } from "@/lib/whatsapp";
+import { registrarCobro } from "@/lib/acciones";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -169,18 +170,17 @@ export default function DetallePrestamo({
   };
 
   const registrarPago = async (c: CuotaDetalle) => {
-    if (!supabase) return;
     setMensaje(null);
     setError(null);
     setEnviandoCuota(c.id);
-    const { error } = await supabase.rpc("pagar_cuota", {
-      p_cuota_id: c.id,
-      p_monto: Number(c.saldo_pendiente),
-      p_fecha: aYMD(hoyLocal()),
+    const res = await registrarCobro({
+      cuotaId: c.id,
+      monto: Number(c.saldo_pendiente),
+      fecha: aYMD(hoyLocal()),
     });
     setEnviandoCuota(null);
-    if (error) {
-      setError(`No se pudo registrar el pago: ${error.message}`);
+    if (!res.ok) {
+      setError(`No se pudo registrar el pago: ${res.error}`);
       return;
     }
     setMensaje(`Cuota ${c.numero} pagada correctamente.`);

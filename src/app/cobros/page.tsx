@@ -11,6 +11,7 @@ import {
   SELECT_PAGOS_REPORTE,
   type PagoExportable,
 } from "@/lib/exportar";
+import { registrarCobro } from "@/lib/acciones";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -223,18 +224,17 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
   }, [totalACobrar, totalRecaudado]);
 
   const pagarCuota = async (c: Cobro) => {
-    if (!supabase) return;
     setMensaje(null);
     setEnviandoId(c.id);
     setErrorGlobal(null);
-    const { error } = await supabase.rpc("pagar_cuota", {
-      p_cuota_id: c.id,
-      p_monto: Number(c.saldo_pendiente),
-      p_fecha: aYMD(hoyLocal()),
+    const res = await registrarCobro({
+      cuotaId: c.id,
+      monto: Number(c.saldo_pendiente),
+      fecha: aYMD(hoyLocal()),
     });
     setEnviandoId(null);
-    if (error) {
-      setErrorGlobal(`No se pudo registrar el pago: ${error.message}`);
+    if (!res.ok) {
+      setErrorGlobal(`No se pudo registrar el pago: ${res.error}`);
       return;
     }
     setMensaje(
@@ -275,18 +275,17 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
       setErrorAbono("Usa un monto menor al saldo (para el total usa Pagar Cuota).");
       return;
     }
-    if (!supabase) return;
     setEnviandoId(c.id);
     setErrorGlobal(null);
     setErrorAbono(null);
-    const { error } = await supabase.rpc("pagar_cuota", {
-      p_cuota_id: c.id,
-      p_monto: monto,
-      p_fecha: aYMD(hoyLocal()),
+    const res = await registrarCobro({
+      cuotaId: c.id,
+      monto,
+      fecha: aYMD(hoyLocal()),
     });
     setEnviandoId(null);
-    if (error) {
-      setErrorGlobal(`No se pudo registrar el abono: ${error.message}`);
+    if (!res.ok) {
+      setErrorGlobal(`No se pudo registrar el abono: ${res.error}`);
       return;
     }
     setMensaje(
