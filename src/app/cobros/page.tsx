@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { aYMD, formatearMoneda, hoyLocal } from "@/lib/prestamos";
 import { crearLinkWhatsApp, mensajeComprobante, mensajeRecordatorio } from "@/lib/whatsapp";
@@ -26,7 +27,7 @@ type Cobro = {
   numero: number;
   monto: number;
   fecha_vencimiento: string;
-  estado: "pendiente" | "parcial";
+  estado: "pendiente" | "parcial" | "vencido";
   saldo_pendiente: number;
   prestamos: {
     numero_cuotas: number;
@@ -104,6 +105,7 @@ const normalizarCobros = (raw: RawCobro[]): Cobro[] =>
   });
 
 export default function Cobros() {
+  const router = useRouter();
   const [cobros, setCobros] = useState<Cobro[]>([]);
   const [totalACobrar, setTotalACobrar] = useState(0);
   const [totalRecaudado, setTotalRecaudado] = useState(0);
@@ -138,7 +140,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
         "id, numero, monto, fecha_vencimiento, estado, saldo_pendiente, prestamos!inner(numero_cuotas, clientes!inner(nombres, apellidos, telefono, direccion, referencia))",
       )
       .lte("fecha_vencimiento", hoy)
-      .in("estado", ["pendiente", "parcial"])
+      .in("estado", ["pendiente", "parcial", "vencido"])
       .order("fecha_vencimiento", { ascending: true });
 
     const { data: pagosData, error: pagosError } = await supabase
@@ -228,6 +230,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     const { error } = await supabase.rpc("pagar_cuota", {
       p_cuota_id: c.id,
       p_monto: Number(c.saldo_pendiente),
+      p_fecha: aYMD(hoyLocal()),
     });
     setEnviandoId(null);
     if (error) {
@@ -249,6 +252,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
           }
         : null,
     );
+    router.refresh();
     await refrescar();
   };
 
@@ -278,6 +282,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     const { error } = await supabase.rpc("pagar_cuota", {
       p_cuota_id: c.id,
       p_monto: monto,
+      p_fecha: aYMD(hoyLocal()),
     });
     setEnviandoId(null);
     if (error) {
@@ -301,6 +306,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     );
     setAbonoAbierto(null);
     setAbonos((prev) => ({ ...prev, [c.id]: "" }));
+    router.refresh();
     await refrescar();
   };
 

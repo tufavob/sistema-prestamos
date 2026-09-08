@@ -34,15 +34,39 @@ type ResultadoDashboard = {
 };
 
 type RawCliente = { id: string; nombres: string; apellidos: string };
-type RawPrestamo = { monto: number; numero_cuotas: number; saldo_pendiente: number };
-type RawCuota = { monto: number; prestamos: RawPrestamo | RawPrestamo[] | null };
-type RawPago = { monto: number; cuotas: RawCuota | RawCuota[] | null };
-type RawPreMora = { clientes: RawCliente | RawCliente[] | null };
-type RawCuotaMora = {
-  fecha_vencimiento: string;
+type PrestamoActivo = {
+  id: string;
+  monto: number;
+  monto_total: number;
   saldo_pendiente: number;
-  prestamos: RawPreMora | RawPreMora[] | null;
 };
+type RawPrePrestamo = {
+  id: string;
+  monto: number;
+  monto_total: number;
+  numero_cuotas: number;
+  saldo_pendiente: number;
+  clientes: RawCliente | RawCliente[] | null;
+};
+type RawCuotaDash = {
+  numero: number;
+  monto: number;
+  monto_pagado: number;
+  saldo_pendiente: number;
+  estado: string;
+  fecha_vencimiento: string;
+  prestamos: RawPrePrestamo | RawPrePrestamo[] | null;
+};
+type RawCuotaPago = {
+  monto: number;
+  prestamos:
+    | { monto: number; numero_cuotas: number }
+    | { monto: number; numero_cuotas: number }[]
+    | null;
+};
+type RawPago = { monto: number; cuotas: RawCuotaPago | RawCuotaPago[] | null };
+
+const ESTADOS_POR_COBRAR = ["pendiente", "parcial", "vencido"];
 
 const primero = <T,>(x: T | T[] | null | undefined): T | null =>
   Array.isArray(x) ? (x[0] ?? null) : (x ?? null);
@@ -67,30 +91,28 @@ export default function Dashboard() {
     if (!supabase) return null;
     const hoy = aYMD(hoyLocal());
 
-    const [prestamosRes, pagosHoyRes, pagosInteresRes, cuotasMoraRes] =
+    const [prestamosRes, pagosHoyRes, pagosInteresRes, cuotasRes] =
       await Promise.all([
         supabase
           .from("prestamos")
-          .select("monto, monto_total, saldo_pendiente")
+          .select("id, monto, monto_total, saldo_pendiente")
           .gt("saldo_pendiente", 0),
         supabase.from("pagos").select("monto").eq("fecha_pago", hoy),
         supabase
           .from("pagos")
-          .select("monto, cuotas!inner(monto, prestamos!inner(monto, numero_cuotas, saldo_pendiente))"),
+          .select("monto, cuotas!inner(monto, prestamos!inner(monto, numero_cuotas))"),
         supabase
           .from("cuotas")
           .select(
-            "fecha_vencimiento, saldo_pendiente, prestamos!inner(clientes!inner(id, nombres, apellidos))",
-          )
-          .lt("fecha_vencimiento", hoy)
-          .in("estado", ["pendiente", "parcial"]),
+            "numero, monto, monto_pagado, saldo_pendiente, estado, fecha_vencimiento, prestamos!inner(id, monto, monto_total, numero_cuotas, saldo_pendiente, clientes!inner(id, nombres, apellidos))",
+          ),
       ]);
 
     const error =
       prestamosRes.error ??
       pagosHoyRes.error ??
       pagosInteresRes.error ??
-      cuotasMoraRes.error;
+      cuotasRes.error;
 
     if (error) {
       return {
@@ -106,21 +128,18 @@ export default function Dashboard() {
       };
     }
 
-    const prestamos = (prestamosRes.data ?? []) as {
-      monto: number;
-      monto_total: number;
-      saldo_pendiente: number;
-    }[];
+    const prestamosActivos = (prestamosRes.data ?? []) as PrestamoActivo[];
+    const idsActivos = new Set(prestamosActivos.map((p) => p.id));
 
-    const montoInicialActivo = prestamos.reduce(
+    const montoInicialActivo = prestamosActivos.reduce(
       (s, p) => s + Number(p.monto),
       0,
     );
-    const totalPorCobrar = prestamos.reduce(
+    const totalPorCobrar = prestamosActivos.reduce(
       (s, p) => s + Number(p.saldo_pendiente),
       0,
     );
-    const gananciaProyectada = prestamos.reduce(
+    const gananciaProyectada = prestamosActivos.reduce(
       (s, p) => s + (Number(p.monto_total) - Number(p.monto)),
       0,
     );
@@ -130,10 +149,23 @@ export default function Dashboard() {
       0,
     );
 
-    const pagos = (pagosInteresRes.data ?? []) as unknown as RawPago[];
+    const cuotas = (cuotasRes.data ?? []) as unknown as RawCuotaDash[];
+
     let capitalRecuperado = 0;
+    for (const raw of cuotas) {
+      const prestamo = primero(raw.prestamos);
+      if (!prestamo || !idsActivos.has(prestamo.id)) continue;
+      const m = Number(raw.monto);
+      if (m <= 0) continue;
+      const principalCuota = Number(prestamo.monto) / Number(prestamo.numero_cuotas);
+      const pagadoCuota = Math.min(Math.max(Number(raw.monto_pagado) || 0, 0), m);
+      capitalRecuperado += principalCuota * (pagadoCuota / m);
+    }
+
+    const capitalEnCalle = Math.max(montoInicialActivo - capitalRecuperado, 0);
+
     let gananciaRealCobrada = 0;
-    for (const p of pagos) {
+    for (const p of (pagosInteresRes.data ?? []) as unknown as RawPago[]) {
       const cuota = primero(p.cuotas);
       const prestamo = cuota ? primero(cuota.prestamos) : null;
       if (!cuota || !prestamo) continue;
@@ -141,21 +173,16 @@ export default function Dashboard() {
       if (cuotaMonto <= 0) continue;
       const principalCuota =
         Number(prestamo.monto) / Number(prestamo.numero_cuotas);
-      const montoPago = Number(p.monto);
-      const pctPrincipal = principalCuota / cuotaMonto;
-      if (Number(prestamo.saldo_pendiente) > 0) {
-        capitalRecuperado += montoPago * pctPrincipal;
-      }
-      gananciaRealCobrada += montoPago * (1 - pctPrincipal);
+      gananciaRealCobrada += Number(p.monto) * (1 - principalCuota / cuotaMonto);
     }
 
-    const capitalEnCalle = montoInicialActivo - capitalRecuperado;
-
     const moraMap = new Map<string, MoraCliente>();
-    for (const raw of (cuotasMoraRes.data ?? []) as unknown as RawCuotaMora[]) {
+    for (const raw of cuotas) {
       const prestamo = primero(raw.prestamos);
       const cliente = prestamo ? primero(prestamo.clientes) : null;
       if (!cliente) continue;
+      if (!ESTADOS_POR_COBRAR.includes(raw.estado)) continue;
+      if (raw.fecha_vencimiento >= hoy) continue;
       const saldo = Number(raw.saldo_pendiente);
       const dias = diasMora(hoy, raw.fecha_vencimiento);
       const existente = moraMap.get(cliente.id);
@@ -182,7 +209,7 @@ export default function Dashboard() {
     return {
       error: null,
       hoy,
-      totalPrestamos: prestamos.length,
+      totalPrestamos: prestamosActivos.length,
       capitalEnCalle,
       totalPorCobrar,
       recaudoHoy,

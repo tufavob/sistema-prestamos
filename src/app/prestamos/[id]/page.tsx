@@ -2,8 +2,9 @@
 
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
-import { formatearMoneda, FRECUENCIAS, type Frecuencia } from "@/lib/prestamos";
+import { aYMD, formatearMoneda, FRECUENCIAS, hoyLocal, type Frecuencia } from "@/lib/prestamos";
 import { crearLinkWhatsApp, mensajeRecordatorio } from "@/lib/whatsapp";
 
 const supabase = hasAuthConfig ? createClient() : null;
@@ -62,11 +63,11 @@ const formatearFechaDB = (s: string) => {
 
 const estadoCuota = (estado: string) => {
   switch (estado) {
-    case "pagada":
+    case "pagado":
       return { label: "Pagada", cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" };
     case "parcial":
       return { label: "Abonada", cls: "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300" };
-    case "atrasada":
+    case "vencido":
       return { label: "Vencida", cls: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300" };
     default:
       return { label: "Pendiente", cls: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" };
@@ -90,6 +91,7 @@ export default function DetallePrestamo({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const router = useRouter();
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
@@ -174,6 +176,7 @@ export default function DetallePrestamo({
     const { error } = await supabase.rpc("pagar_cuota", {
       p_cuota_id: c.id,
       p_monto: Number(c.saldo_pendiente),
+      p_fecha: aYMD(hoyLocal()),
     });
     setEnviandoCuota(null);
     if (error) {
@@ -181,6 +184,7 @@ export default function DetallePrestamo({
       return;
     }
     setMensaje(`Cuota ${c.numero} pagada correctamente.`);
+    router.refresh();
     await refrescar();
   };
 
@@ -371,7 +375,7 @@ export default function DetallePrestamo({
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                   {cuotas.map((c) => {
                     const ec = estadoCuota(c.estado);
-                    const pagada = c.estado === "pagada";
+                    const pagada = c.estado === "pagado";
                     const cliente = primero(prestamo.clientes);
                     return (
                       <tr key={c.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
