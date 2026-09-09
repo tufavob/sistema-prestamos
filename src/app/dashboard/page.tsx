@@ -144,7 +144,7 @@ export default function Dashboard() {
     });
 
     try {
-      const [metricasRes, moraRes] = await Promise.all([
+      const [metricasRes, moraRes, pagosRes] = await Promise.all([
         supabase.rpc("metricas_dashboard"),
         supabase
           .from("cuotas")
@@ -153,6 +153,7 @@ export default function Dashboard() {
           )
           .lt("fecha_vencimiento", hoy)
           .in("estado", ESTADOS_POR_COBRAR),
+        supabase.from("pagos").select("monto").eq("fecha_pago", hoy),
       ]);
 
       console.log("Metricas desde Supabase:", metricasRes.data);
@@ -167,6 +168,16 @@ export default function Dashboard() {
         metricasRaw = JSON.parse(metricasRaw);
       }
       const met = leerMetricas(metricasRaw);
+
+      let recaudoDelDia = 0;
+      if (pagosRes.error) {
+        console.error("Error cargando pagos del día:", pagosRes.error);
+      } else {
+        recaudoDelDia = (pagosRes.data ?? []).reduce(
+          (total, p) => total + numero(p.monto),
+          0,
+        );
+      }
 
       const moraMap = new Map<string, MoraCliente>();
       if (moraRes.error) {
@@ -206,7 +217,7 @@ export default function Dashboard() {
         totalPrestamos: met.prestamosActivos,
         capitalEnCalle: met.capitalCalle,
         totalPorCobrar: met.totalPorCobrar,
-        recaudoHoy: met.recaudoDia,
+        recaudoHoy: recaudoDelDia,
         gananciaProyectada: met.gananciaProyectada,
         gananciaRealCobrada: met.gananciaReal,
         mora,
@@ -238,6 +249,8 @@ export default function Dashboard() {
   }, [obtenerDashboard]);
 
   const montoVencidoTotal = datos?.mora.reduce((s, m) => s + m.montoVencido, 0) ?? 0;
+
+  const recaudoDelDia = datos?.recaudoHoy ?? 0;
 
   const exportarReporte = async () => {
     if (!supabase || !datos) return;
@@ -360,8 +373,8 @@ export default function Dashboard() {
               <p className="text-xs font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
                 Recaudo del día
               </p>
-              <p className="mt-1 truncate text-2xl font-bold text-emerald-700 dark:text-emerald-300">
-                {formatearMoneda(datos.recaudoHoy)}
+              <p className="mt-1 text-2xl font-bold">
+                S/ {recaudoDelDia > 0 ? recaudoDelDia.toFixed(2) : "0.00"}
               </p>
               <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
                 Cobrado hoy
