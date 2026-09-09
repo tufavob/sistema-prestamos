@@ -346,57 +346,62 @@ export default function DetallePrestamo({
               </span>
             </div>
 
-            <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-              <table className="w-full text-left text-sm">
+            <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-zinc-900">
+              <table className="w-full border-collapse text-left text-sm">
                 <thead className="border-b border-slate-200 bg-slate-100 font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-200">
                   <tr>
-                    <th className="w-20 p-3 text-center">N° Cuota</th>
-                    <th className="p-3">Fecha Vencimiento</th>
-                    <th className="p-3">Monto</th>
-                    <th className="p-3">Estado</th>
+                    <th className="border-r border-slate-200 p-3 text-center dark:border-slate-800">N° Cuota</th>
+                    <th className="border-r border-slate-200 p-3 dark:border-slate-800">Fecha Vencimiento</th>
+                    <th className="border-r border-slate-200 p-3 dark:border-slate-800">Monto</th>
+                    <th className="border-r border-slate-200 p-3 dark:border-slate-800">Estado</th>
                     <th className="p-3 text-center">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                  {cuotas.map((cuota, index) => {
-                    const pagada = cuota.estado.toLowerCase() === "pagado";
-                    return (
+                  {cuotas && cuotas.length > 0 ? (
+                    cuotas.map((cuota, index) => (
                       <tr key={cuota.id || index} className="hover:bg-slate-50 dark:hover:bg-zinc-800/40">
-                        <td className="p-3 text-center font-bold text-slate-900 dark:text-zinc-50">
+                        <td className="border-r border-slate-100 p-3 text-center font-bold text-slate-900 dark:border-slate-800 dark:text-zinc-50">
                           {index + 1}
                         </td>
-                        <td className="p-3 text-slate-700 dark:text-zinc-300">
+                        <td className="border-r border-slate-100 p-3 text-slate-700 dark:border-slate-800 dark:text-zinc-300">
                           {formatearFechaDB(cuota.fecha_vencimiento)}
                         </td>
-                        <td className="p-3 font-semibold text-slate-900 dark:text-zinc-50">
+                        <td className="border-r border-slate-100 p-3 font-semibold text-slate-900 dark:border-slate-800 dark:text-zinc-50">
                           S/ {Number(cuota.monto).toFixed(2)}
                         </td>
-                        <td className="p-3">
-                          {pagada ? (
-                            <span className="rounded-full bg-green-100 px-2 py-1 text-xs font-semibold text-green-700 dark:bg-green-950 dark:text-green-300">
+                        <td className="border-r border-slate-100 p-3 dark:border-slate-800">
+                          {String(cuota.estado).toLowerCase() === "pagado" ? (
+                            <span className="inline-block rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700 dark:bg-green-950 dark:text-green-300">
                               ✓ Pagado
                             </span>
                           ) : (
-                            <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                            <span className="inline-block rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
                               Pendiente
                             </span>
                           )}
                         </td>
                         <td className="p-3 text-center">
-                          {!pagada && (
+                          {String(cuota.estado).toLowerCase() !== "pagado" && (
                             <button
                               type="button"
                               onClick={() => registrarPago(cuota)}
                               disabled={enviandoCuota === cuota.id}
-                              className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                              className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               {enviandoCuota === cuota.id ? "Procesando..." : "Registrar Pago"}
                             </button>
                           )}
                         </td>
                       </tr>
-                    );
-                  })}
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={5} className="p-4 text-center text-slate-500 dark:text-zinc-400">
+                        No hay cuotas registradas para este préstamo.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
