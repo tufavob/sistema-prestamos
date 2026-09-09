@@ -87,6 +87,12 @@ type RawCobro = {
   prestamos: RawPrestamo | RawPrestamo[] | null;
 };
 
+type RawCobroPagada = RawCobro & {
+  monto_pagado?: number | null;
+  fecha_pago?: string | null;
+  updated_at?: string | null;
+};
+
 const normalizarCobros = (raw: RawCobro[]): Cobro[] =>
   raw.map((r) => {
     const p = Array.isArray(r.prestamos) ? r.prestamos[0] : r.prestamos;
@@ -136,84 +142,67 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     const hoy = aYMD(hoyLocal());
     const hoySVE = new Date().toLocaleDateString("sv-SE");
 
+    // Uso `*` para no depender de columnas específicas de cada entorno.
     const seleccionCuotas =
-      "id, numero, monto, fecha_vencimiento, estado, saldo_pendiente, prestamos!inner(numero_cuotas, clientes!inner(nombres, apellidos, telefono, direccion, referencia))";
+      "*, prestamos!inner(numero_cuotas, clientes!inner(nombres, apellidos, telefono, direccion, referencia))";
 
-    const { data: cuotasData, error: cuotasError } = await supabase
-      .from("cuotas")
-      .select(seleccionCuotas)
-      .eq("fecha_vencimiento", hoy)
-      .in("estado", ["pendiente", "parcial", "vencido", "pagado"])
-      .order("fecha_vencimiento", { ascending: true });
-
-    const { data: pagosData, error: pagosError } = await supabase
-      .from("pagos")
-      .select("monto, fecha_pago, created_at, cuota_id");
-
-    if (cuotasError) {
-      return {
-        error: `No se pudieron cargar los cobros: ${cuotasError.message}. Revisa que la tabla "cuotas" tenga la columna fecha_vencimiento (migración 02).`,
-        cobros: [],
-        totalACobrar: 0,
-        totalRecaudado: 0,
-        hoy,
-      };
-    }
-    if (pagosError) {
-      return {
-        error: `No se pudo cargar el resumen del día: ${pagosError.message}. Revisa que la tabla "pagos" exista (migración 02).`,
-        cobros: [],
-        totalACobrar: 0,
-        totalRecaudado: 0,
-        hoy,
-      };
-    }
-
-    const cuotas = normalizarCobros((cuotasData as unknown as RawCobro[]) ?? []);
-
-    // Recaudado hoy = pagos registrados HOY (fecha real del cobro).
-    const cuotasPagadasHoy = new Set<string>();
-    const recaudadoHoy = (
-      (pagosData as
-        | Array<{
-            monto: number;
-            fecha_pago: string;
-            created_at: string;
-            cuota_id: string;
-          }>
-        | null) ??
-      []
-    ).reduce((suma, pago) => {
-      const fechaPago = new Date(pago.created_at || pago.fecha_pago).toLocaleDateString(
-        "sv-SE",
-      );
-      if (fechaPago !== hoySVE) return suma;
-      cuotasPagadasHoy.add(pago.cuota_id);
-      return suma + Number(pago.monto || 0);
-    }, 0);
-
-    // Cuotas cobradas hoy con vencimiento distinto (pago adelantado o atrasado).
-    if (cuotasPagadasHoy.size > 0) {
-      const { data: pagadasHoyData, error: pagadasHoyError } = await supabase
+    const [respDia, respPagadas] = await Promise.all([
+      supabase
         .from("cuotas")
         .select(seleccionCuotas)
-        .in("id", [...cuotasPagadasHoy]);
+        .eq("fecha_vencimiento", hoy)
+        .in("estado", ["pendiente", "parcial", "vencido", "pagado"])
+        .order("fecha_vencimiento", { ascending: true }),
+      supabase.from("cuotas").select(seleccionCuotas).eq("estado", "pagado"),
+    ]);
 
-      if (!pagadasHoyError) {
-        const idsActuales = new Set(cuotas.map((c) => c.id));
-        for (const c of normalizarCobros((pagadasHoyData as unknown as RawCobro[]) ?? [])) {
-          if (!idsActuales.has(c.id)) {
-            idsActuales.add(c.id);
-            cuotas.push(c);
-          }
+    if (respDia.error) {
+      return {
+        error: `No se pudieron cargar los cobros: ${respDia.error.message}. Revisa que la tabla "cuotas" tenga la columna fecha_vencimiento (migración 02).`,
+        cobros: [],
+        totalACobrar: 0,
+        totalRecaudado: 0,
+        hoy,
+      };
+    }
+
+    const diaCuotas = normalizarCobros((respDia.data as unknown as RawCobro[]) ?? []);
+
+    // Recaudado hoy = cuotas pagadas cuyo cobro se registró HOY.
+    // (updated_at o fecha_pago de la cuota; si no hay fecha, se asume hoy.)
+    let recaudadoHoy = 0;
+    const pagadasHoy: RawCobroPagada[] = [];
+    if (respPagadas.error) {
+      for (const c of diaCuotas) {
+        if (c.estado === "pagado") recaudadoHoy += Number(c.monto);
+      }
+    } else {
+      for (const raw of (respPagadas.data as unknown as RawCobroPagada[]) ?? []) {
+        const fechaPago = raw.updated_at ?? raw.fecha_pago ?? null;
+        const esHoy = fechaPago
+          ? new Date(fechaPago).toLocaleDateString("sv-SE") === hoySVE
+          : true;
+        if (esHoy) {
+          pagadasHoy.push(raw);
+          recaudadoHoy += Number(raw.monto_pagado ?? raw.monto ?? 0);
         }
       }
     }
 
+    // Listado: cuotas del día + pagadas hoy con vencimiento distinto
+    // (pago adelantado o atrasado).
+    const cobros = [...diaCuotas];
+    const idsActuales = new Set(cobros.map((c) => c.id));
+    for (const raw of pagadasHoy) {
+      if (idsActuales.has(raw.id)) continue;
+      idsActuales.add(raw.id);
+      cobros.push(normalizarCobros([raw])[0]);
+    }
+
     return {
       error: null,
-      cobros: cuotas,
-      totalACobrar: cuotas.reduce(
+      cobros,
+      totalACobrar: diaCuotas.reduce(
         (s, c) => (c.estado === "pendiente" ? s + Number(c.monto) : s),
         0,
       ),
@@ -529,7 +518,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
             Recaudado hoy
           </p>
           <p className="mt-1 text-2xl font-bold text-emerald-700 dark:text-emerald-300">
-            {formatearMoneda(totalRecaudado)}
+            S/ {totalRecaudado.toFixed(2)}
           </p>
           <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-emerald-200/70 dark:bg-emerald-900">
             <div
