@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
@@ -100,6 +100,16 @@ export default function DetallePrestamo({
   const [prestamo, setPrestamo] = useState<PrestamoDetalle | null>(null);
   const [cuotas, setCuotas] = useState<CuotaDetalle[]>([]);
   const [enviandoCuota, setEnviandoCuota] = useState<string | null>(null);
+
+  const saldoPendiente = useMemo(
+    () =>
+      cuotas.reduce(
+        (acc, cuota) =>
+          acc + (cuota.estado.toLowerCase() === "pagado" ? 0 : Number(cuota.saldo_pendiente)),
+        0,
+      ),
+    [cuotas],
+  );
 
   const obtenerDatos = useCallback(async (): Promise<ResultadoDetalle | null> => {
     if (!supabase || !id) return null;
@@ -290,12 +300,12 @@ export default function DetallePrestamo({
               </div>
               <span
                 className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                  Number(prestamo.saldo_pendiente) > 0
+                  saldoPendiente > 0
                     ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                     : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                 }`}
               >
-                {Number(prestamo.saldo_pendiente) > 0 ? "Activo" : "Pagado"}
+                {saldoPendiente > 0 ? "Activo" : "Pagado"}
               </span>
             </div>
 
@@ -345,7 +355,7 @@ export default function DetallePrestamo({
                   Saldo pendiente
                 </dt>
                 <dd className="mt-1 text-base font-bold text-red-600 dark:text-red-400">
-                  {formatearMoneda(Number(prestamo.saldo_pendiente))}
+                  {formatearMoneda(saldoPendiente)}
                 </dd>
               </div>
             </dl>
@@ -363,32 +373,32 @@ export default function DetallePrestamo({
 
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="bg-zinc-50 dark:bg-zinc-800/60">
-                  <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-                    <th className="px-5 py-3 font-semibold">N° Cuota</th>
-                    <th className="px-5 py-3 font-semibold">Fecha de vencimiento</th>
-                    <th className="px-5 py-3 text-right font-semibold">Monto</th>
-                    <th className="px-5 py-3 font-semibold">Estado</th>
-                    <th className="px-5 py-3 text-right font-semibold">Acciones</th>
+                <thead className="border-b bg-slate-100 dark:border-slate-700 dark:bg-slate-800/70">
+                  <tr className="text-slate-700 dark:text-slate-200">
+                    <th className="p-3 text-left">N° Cuota</th>
+                    <th className="p-3 text-left">Fecha Vencimiento</th>
+                    <th className="p-3 text-left">Monto</th>
+                    <th className="p-3 text-left">Estado</th>
+                    <th className="p-3 text-center">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
                   {cuotas.map((c) => {
                     const ec = estadoCuota(c.estado);
-                    const pagada = c.estado === "pagado";
+                    const pagada = c.estado.toLowerCase() === "pagado";
                     const cliente = primero(prestamo.clientes);
                     return (
                       <tr key={c.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
-                        <td className="px-5 py-3 font-medium text-zinc-900 dark:text-zinc-50">
+                        <td className="p-3 font-medium text-zinc-900 dark:text-zinc-50">
                           {c.numero}
                         </td>
-                        <td className="px-5 py-3 text-zinc-600 dark:text-zinc-300">
+                        <td className="p-3 text-zinc-600 dark:text-zinc-300">
                           {formatearFechaDB(c.fecha_vencimiento)}
                         </td>
-                        <td className="px-5 py-3 text-right font-semibold text-zinc-900 dark:text-zinc-50">
+                        <td className="p-3 font-semibold text-zinc-900 dark:text-zinc-50">
                           {formatearMoneda(Number(c.monto))}
                         </td>
-                        <td className="px-5 py-3">
+                        <td className="p-3">
                           <span
                             className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${ec.cls}`}
                           >
@@ -400,8 +410,8 @@ export default function DetallePrestamo({
                             </p>
                           )}
                         </td>
-                        <td className="px-5 py-3">
-                          <div className="flex items-center justify-end gap-2">
+                        <td className="p-3 text-center">
+                          <div className="flex items-center justify-center gap-2">
                             {!pagada && cliente?.telefono && (
                               <a
                                 href={crearLinkWhatsApp(
@@ -421,25 +431,27 @@ export default function DetallePrestamo({
                                 <WhatsAppIcon className="h-4 w-4" />
                               </a>
                             )}
-                            <button
-                              type="button"
-                              onClick={() => registrarPago(c)}
-                              disabled={pagada || enviandoCuota === c.id}
-                              className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                                pagada
-                                  ? "bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500"
-                                  : "bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-                              }`}
-                            >
-                              {enviandoCuota === c.id ? (
-                                <>
-                                  <Spinner />
-                                  Procesando...
-                                </>
-                              ) : (
-                                "Registrar Pago"
-                              )}
-                            </button>
+                            {pagada ? (
+                              <span className="font-medium text-green-600 dark:text-green-400">
+                                ✓ Pagado
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => registrarPago(c)}
+                                disabled={enviandoCuota === c.id}
+                                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-zinc-900 px-3 text-xs font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                              >
+                                {enviandoCuota === c.id ? (
+                                  <>
+                                    <Spinner />
+                                    Procesando...
+                                  </>
+                                ) : (
+                                  "Registrar Pago"
+                                )}
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
