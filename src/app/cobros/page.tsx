@@ -16,6 +16,7 @@ import { registrarCobro } from "@/lib/acciones";
 const supabase = hasAuthConfig ? createClient() : null;
 
 type ClienteCobro = {
+  id: string;
   nombres: string;
   apellidos: string;
   telefono: string | null;
@@ -30,10 +31,40 @@ type Cobro = {
   fecha_vencimiento: string;
   estado: "pendiente" | "parcial" | "vencido" | "pagado";
   saldo_pendiente: number;
+  fecha_pago?: string | null;
   prestamos: {
     numero_cuotas: number;
     clientes: ClienteCobro | null;
   } | null;
+};
+
+const formatearDiaMes = (iso: string | null | undefined) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const meses = [
+    "ene",
+    "feb",
+    "mar",
+    "abr",
+    "may",
+    "jun",
+    "jul",
+    "ago",
+    "set",
+    "oct",
+    "nov",
+    "dic",
+  ];
+  return `${String(d.getDate()).padStart(2, "0")}-${meses[d.getMonth()]}.`;
+};
+
+const fechaPagoEsHoy = (c: Cobro) => {
+  if (!c.fecha_pago) return true;
+  return (
+    new Date(c.fecha_pago).toLocaleDateString("sv-SE") ===
+    new Date().toLocaleDateString("sv-SE")
+  );
 };
 
 const inputCls =
@@ -84,6 +115,8 @@ type RawCobro = {
   fecha_vencimiento: string;
   estado: Cobro["estado"];
   saldo_pendiente: number;
+  fecha_pago?: string | null;
+  updated_at?: string | null;
   prestamos: RawPrestamo | RawPrestamo[] | null;
 };
 
@@ -105,6 +138,7 @@ const normalizarCobros = (raw: RawCobro[]): Cobro[] =>
       fecha_vencimiento: r.fecha_vencimiento,
       estado: r.estado,
       saldo_pendiente: r.saldo_pendiente,
+      fecha_pago: r.fecha_pago ?? r.updated_at ?? null,
       prestamos: p
         ? { numero_cuotas: p.numero_cuotas, clientes: cliente ?? null }
         : null,
@@ -144,7 +178,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
 
     // Uso `*` para no depender de columnas específicas de cada entorno.
     const seleccionCuotas =
-      "*, prestamos!inner(numero_cuotas, clientes!inner(nombres, apellidos, telefono, direccion, referencia))";
+      "*, prestamos!inner(numero_cuotas, clientes!inner(id, nombres, apellidos, telefono, direccion, referencia))";
 
     const [respDia, respPagadas] = await Promise.all([
       supabase
@@ -252,6 +286,26 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     if (totalACobrar <= 0) return 0;
     return Math.min(100, Math.round((totalRecaudado / totalACobrar) * 100));
   }, [totalACobrar, totalRecaudado]);
+
+  type GrupoCobros = {
+    cliente: ClienteCobro;
+    cobros: Cobro[];
+  };
+
+  const grupos = useMemo<GrupoCobros[]>(() => {
+    const mapa = new Map<string, GrupoCobros>();
+    for (const c of cobros) {
+      const cliente = c.prestamos?.clientes;
+      if (!cliente) continue;
+      const actual = mapa.get(cliente.id);
+      if (actual) {
+        actual.cobros.push(c);
+      } else {
+        mapa.set(cliente.id, { cliente, cobros: [c] });
+      }
+    }
+    return [...mapa.values()];
+  }, [cobros]);
 
   const pagarCuota = async (c: Cobro) => {
     setMensaje(null);
@@ -549,239 +603,38 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
           No hay cuotas pendientes para hoy. ¡Ruta al día!
         </div>
       ) : (
-        <ul className="flex flex-col gap-4 sm:grid sm:grid-cols-2 sm:gap-4">
-          {cobros.map((c, i) => {
-            const cliente = c.prestamos?.clientes;
-            const saldo = Number(c.saldo_pendiente);
-            const monto = Number(c.monto);
-            const pagado = c.estado === "pagado";
-            const montoPagadoCuota = monto - saldo;
-            const parcial = !pagado && c.estado === "parcial";
-            const vencida = !pagado && c.fecha_vencimiento < fechaHoy;
-            const adelantada = pagado && c.fecha_vencimiento > fechaHoy;
-            const pctCuota =
-              monto > 0 ? Math.min(100, Math.round((montoPagadoCuota / monto) * 100)) : 0;
+        <ul className="flex flex-col gap-4">
+          {grupos.map((g) => {
+            const cliente = g.cliente;
+            const pagadas = g.cobros.filter((c) => c.estado === "pagado");
+            const pendientes = g.cobros.filter((c) => c.estado !== "pagado");
+            const totalHoy = pagadas.reduce(
+              (s, c) => (fechaPagoEsHoy(c) ? s + Number(c.monto) : s),
+              0,
+            );
 
             return (
               <li
-                key={c.id}
-                className="flex flex-col gap-3 rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900"
+                key={cliente.id}
+                className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900"
               >
-                {cliente && (
-                  <div className="flex items-start gap-3">
-                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-900 text-sm font-semibold text-white dark:bg-zinc-200 dark:text-zinc-900">
-                      {iniciales(cliente)}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                        {nombreCompleto(cliente)}
-                      </p>
-                      <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                        {cliente.telefono && (
-                          <a
-                            href={`tel:${cliente.telefono}`}
-                            className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400"
-                          >
-                            <svg
-                              className="h-3 w-3"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              aria-hidden="true"
-                            >
-                              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" />
-                            </svg>
-                            {cliente.telefono}
-                          </a>
-                        )}
-                        {cliente.direccion && (
-                          <span className="inline-flex items-center gap-1">
-                            <svg
-                              className="h-3 w-3"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              aria-hidden="true"
-                            >
-                              <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
-                              <circle cx="12" cy="10" r="3" />
-                            </svg>
-                            {cliente.direccion}
-                          </span>
-                        )}
-                      </div>
-                      {cliente.referencia && (
-                        <p className="mt-0.5 truncate text-xs text-zinc-400 dark:text-zinc-500">
-                          Ref: {cliente.referencia}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      {!pagado && cliente?.telefono && (
+                {/* Cabecera del cliente */}
+                <div className="flex items-start gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-900 text-sm font-semibold text-white dark:bg-zinc-200 dark:text-zinc-900">
+                    {iniciales(cliente)}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                      {nombreCompleto(cliente)}
+                    </p>
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                      {cliente.telefono && (
                         <a
-                          href={crearLinkWhatsApp(
-                            cliente.telefono,
-                            mensajeRecordatorio({
-                              nombres: nombreCompleto(cliente),
-                              numeroCuota: i + 1,
-                              monto,
-                            }),
-                          )}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          aria-label="Enviar recordatorio por WhatsApp"
-                          title="Enviar recordatorio por WhatsApp"
-                          className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-white transition hover:bg-emerald-700"
-                        >
-                          <WhatsAppIcon className="h-3.5 w-3.5" />
-                        </a>
-                      )}
-                      <span
-                        className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
-                          pagado
-                            ? adelantada
-                              ? "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                              : "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                            : vencida
-                              ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
-                              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                        }`}
-                      >
-                        {pagado
-                          ? adelantada
-                            ? "Cobro Adelantado"
-                            : "✓ Pagado"
-                          : vencida
-                            ? "Vencida"
-                            : "Hoy"}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between rounded-xl bg-zinc-50 px-3.5 py-2.5 dark:bg-zinc-800/60">
-                  <div>
-                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                      {`Cuota ${i + 1} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
-                      {formatearFechaDB(c.fecha_vencimiento)}
-                    </p>
-                    <p className="text-base font-bold text-zinc-900 dark:text-zinc-50">
-                      {formatearMoneda(monto)}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {parcial
-                        ? "Saldo pendiente"
-                        : pagado
-                          ? "Monto cobrado"
-                          : "Saldo a cobrar"}
-                    </p>
-                    <p
-                      className={`text-base font-bold ${
-                        parcial
-                          ? "text-amber-600 dark:text-amber-400"
-                          : pagado
-                            ? "text-emerald-600 dark:text-emerald-400"
-                            : "text-zinc-900 dark:text-zinc-50"
-                      }`}
-                    >
-                      {pagado ? formatearMoneda(monto) : formatearMoneda(saldo)}
-                    </p>
-                  </div>
-                </div>
-
-                {parcial && (
-                  <div>
-                    <div className="mb-1 flex justify-between text-[11px] text-zinc-500 dark:text-zinc-400">
-                      <span>
-                        Pagado {formatearMoneda(montoPagadoCuota)} de {formatearMoneda(monto)}
-                      </span>
-                      <span>{pctCuota}%</span>
-                    </div>
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
-                      <div
-                        className="h-full rounded-full bg-amber-500"
-                        style={{ width: `${pctCuota}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {pagado ? (
-                  <div className="mt-auto flex items-center justify-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2.5 text-sm font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-                    <svg
-                      className="h-4 w-4"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2.5"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M20 6 9 17l-5-5" />
-                    </svg>
-                    Cuota cobrada
-                  </div>
-                ) : (
-                  <div className="mt-auto flex flex-col gap-2">
-                  {abonoAbierto === c.id && (
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        registrarAbono(c);
-                      }}
-                      className="flex flex-col gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-700 dark:bg-zinc-800/60"
-                    >
-                      <label
-                        htmlFor={`abono-${c.id}`}
-                        className="text-xs font-medium text-zinc-600 dark:text-zinc-300"
-                      >
-                        Monto del abono (menor a {formatearMoneda(saldo)})
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          id={`abono-${c.id}`}
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          inputMode="decimal"
-                          autoFocus
-                          placeholder="0.00"
-                          className={inputCls}
-                          value={abonos[c.id] ?? ""}
-                          onChange={(e) => {
-                            setAbonos((prev) => ({ ...prev, [c.id]: e.target.value }));
-                            setErrorAbono(null);
-                          }}
-                          disabled={enviandoId === c.id}
-                        />
-                        <button
-                          type="submit"
-                          disabled={enviandoId === c.id}
-                          className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-amber-500 px-4 text-sm font-semibold text-white transition hover:bg-amber-600 disabled:opacity-60"
-                        >
-                          {enviandoId === c.id ? <Spinner /> : "Registrar"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAbonoAbierto(null);
-                            setErrorAbono(null);
-                          }}
-                          disabled={enviandoId === c.id}
-                          className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-300 text-zinc-500 transition hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:hover:bg-zinc-800"
-                          aria-label="Cancelar abono"
+                          href={`tel:${cliente.telefono}`}
+                          className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400"
                         >
                           <svg
-                            className="h-4 w-4"
+                            className="h-3 w-3"
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
@@ -790,45 +643,290 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                             strokeLinejoin="round"
                             aria-hidden="true"
                           >
-                            <path d="M18 6 6 18M6 6l12 12" />
+                            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" />
                           </svg>
-                        </button>
-                      </div>
-                      {errorAbono && (
-                        <p className="text-xs text-red-600 dark:text-red-400">{errorAbono}</p>
+                          {cliente.telefono}
+                        </a>
                       )}
-                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                        El pago total se registra con &quot;Pagar cuota&quot;.
+                      {cliente.direccion && (
+                        <span className="inline-flex items-center gap-1">
+                          <svg
+                            className="h-3 w-3"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+                            <circle cx="12" cy="10" r="3" />
+                          </svg>
+                          {cliente.direccion}
+                        </span>
+                      )}
+                    </div>
+                    {cliente.referencia && (
+                      <p className="mt-0.5 truncate text-xs text-zinc-400 dark:text-zinc-500">
+                        Ref: {cliente.referencia}
                       </p>
-                    </form>
-                  )}
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={abonoAbierto === c.id ? () => setAbonoAbierto(null) : () => abrirAbono(c)}
-                      disabled={enviandoId === c.id}
-                      className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                    >
-                      {abonoAbierto === c.id ? "Cancelar" : "Abono parcial"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => pagarCuota(c)}
-                      disabled={enviandoId === c.id}
-                      className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-zinc-900 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-                    >
-                      {enviandoId === c.id ? (
-                        <>
-                          <Spinner />
-                          Procesando...
-                        </>
-                      ) : (
-                        "Pagar cuota"
-                      )}
-                    </button>
+                    )}
                   </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1.5">
+                    {totalHoy > 0 && (
+                      <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                        Cobrado hoy · S/ {totalHoy.toFixed(2)}
+                      </span>
+                    )}
+                    {pendientes.length > 0 && (
+                      <span className="rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                        {pendientes.length} por cobrar
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Cuotas cobradas (cobradas hoy) */}
+                {pagadas.length > 0 && (
+                  <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 dark:border-emerald-800 dark:bg-emerald-950">
+                    <ul className="flex flex-col gap-1.5">
+                      {pagadas.map((c) => {
+                        const adelantada = c.fecha_vencimiento > fechaHoy;
+                        return (
+                          <li
+                            key={c.id}
+                            className="flex items-center justify-between gap-3"
+                          >
+                            <span className="text-sm font-medium text-emerald-800 dark:text-emerald-200">
+                              ✓ Cuota {c.numero}/
+                              {c.prestamos?.numero_cuotas ?? "?"} · Cobrado el{" "}
+                              {formatearDiaMes(c.fecha_pago)}
+                              {adelantada && (
+                                <span className="ml-1.5 rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700 dark:bg-sky-950 dark:text-sky-300">
+                                  Adelantado
+                                </span>
+                              )}
+                            </span>
+                            <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                              {formatearMoneda(Number(c.monto))}
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    <div className="mt-2 flex items-center justify-between border-t border-emerald-200 pt-2 text-sm dark:border-emerald-800">
+                      <span className="font-medium text-emerald-800 dark:text-emerald-200">
+                        Total cobrado hoy
+                      </span>
+                      <span className="text-base font-bold text-emerald-700 dark:text-emerald-300">
+                        S/ {totalHoy.toFixed(2)}
+                      </span>
+                    </div>
                   </div>
                 )}
+
+                {/* Cuotas por cobrar */}
+                {pendientes.map((c) => {
+                  const saldo = Number(c.saldo_pendiente);
+                  const monto = Number(c.monto);
+                  const montoPagadoCuota = monto - saldo;
+                  const parcial = c.estado === "parcial";
+                  const vencida = c.estado === "vencido" || c.fecha_vencimiento < fechaHoy;
+                  const pctCuota =
+                    monto > 0
+                      ? Math.min(100, Math.round((montoPagadoCuota / monto) * 100))
+                      : 0;
+
+                  return (
+                    <div
+                      key={c.id}
+                      className={`mt-3 rounded-xl border p-3.5 ${
+                        parcial
+                          ? "border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950"
+                          : "border-zinc-200 bg-zinc-50/60 dark:border-zinc-800 dark:bg-zinc-800/60"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                          {`Cuota ${c.numero} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
+                          {formatearFechaDB(c.fecha_vencimiento)}
+                        </p>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {cliente.telefono && (
+                            <a
+                              href={crearLinkWhatsApp(
+                                cliente.telefono,
+                                mensajeRecordatorio({
+                                  nombres: nombreCompleto(cliente),
+                                  numeroCuota: c.numero,
+                                  monto,
+                                }),
+                              )}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              aria-label="Enviar recordatorio por WhatsApp"
+                              title="Enviar recordatorio por WhatsApp"
+                              className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-white transition hover:bg-emerald-700"
+                            >
+                              <WhatsAppIcon className="h-3.5 w-3.5" />
+                            </a>
+                          )}
+                          <span
+                            className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+                              vencida
+                                ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+                                : parcial
+                                  ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                                  : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                            }`}
+                          >
+                            {vencida ? "Vencida" : parcial ? "Parcial" : "Hoy"}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="mt-2 flex items-center justify-between">
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {parcial ? "Saldo pendiente" : "Saldo a cobrar"}
+                        </p>
+                        <p
+                          className={`text-base font-bold ${
+                            parcial
+                              ? "text-amber-600 dark:text-amber-400"
+                              : "text-zinc-900 dark:text-zinc-50"
+                          }`}
+                        >
+                          {formatearMoneda(saldo)}
+                        </p>
+                      </div>
+
+                      {parcial && (
+                        <div className="mt-2">
+                          <div className="mb-1 flex justify-between text-[11px] text-zinc-500 dark:text-zinc-400">
+                            <span>
+                              Pagado {formatearMoneda(montoPagadoCuota)} de{" "}
+                              {formatearMoneda(monto)}
+                            </span>
+                            <span>{pctCuota}%</span>
+                          </div>
+                          <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+                            <div
+                              className="h-full rounded-full bg-amber-500"
+                              style={{ width: `${pctCuota}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {abonoAbierto === c.id && (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            registrarAbono(c);
+                          }}
+                          className="mt-3 flex flex-col gap-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900"
+                        >
+                          <label
+                            htmlFor={`abono-${c.id}`}
+                            className="text-xs font-medium text-zinc-600 dark:text-zinc-300"
+                          >
+                            Monto del abono (menor a {formatearMoneda(saldo)})
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              id={`abono-${c.id}`}
+                              type="number"
+                              min={0}
+                              step="0.01"
+                              inputMode="decimal"
+                              autoFocus
+                              placeholder="0.00"
+                              className={inputCls}
+                              value={abonos[c.id] ?? ""}
+                              onChange={(e) => {
+                                setAbonos((prev) => ({
+                                  ...prev,
+                                  [c.id]: e.target.value,
+                                }));
+                                setErrorAbono(null);
+                              }}
+                              disabled={enviandoId === c.id}
+                            />
+                            <button
+                              type="submit"
+                              disabled={enviandoId === c.id}
+                              className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-amber-500 px-4 text-sm font-semibold text-white transition hover:bg-amber-600 disabled:opacity-60"
+                            >
+                              {enviandoId === c.id ? <Spinner /> : "Registrar"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAbonoAbierto(null);
+                                setErrorAbono(null);
+                              }}
+                              disabled={enviandoId === c.id}
+                              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-300 text-zinc-500 transition hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                              aria-label="Cancelar abono"
+                            >
+                              <svg
+                                className="h-4 w-4"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path d="M18 6 6 18M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
+                          {errorAbono && (
+                            <p className="text-xs text-red-600 dark:text-red-400">
+                              {errorAbono}
+                            </p>
+                          )}
+                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                            El pago total se registra con &quot;Pagar cuota&quot;.
+                          </p>
+                        </form>
+                      )}
+
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={
+                            abonoAbierto === c.id
+                              ? () => setAbonoAbierto(null)
+                              : () => abrirAbono(c)
+                          }
+                          disabled={enviandoId === c.id}
+                          className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                        >
+                          {abonoAbierto === c.id ? "Cancelar" : "Abono parcial"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => pagarCuota(c)}
+                          disabled={enviandoId === c.id}
+                          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-zinc-900 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                        >
+                          {enviandoId === c.id ? (
+                            <>
+                              <Spinner />
+                              Procesando...
+                            </>
+                          ) : (
+                            "Pagar cuota"
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </li>
             );
           })}
