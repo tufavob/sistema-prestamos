@@ -62,7 +62,17 @@ export default function NuevoPrestamo() {
         if (activo && error) {
           setErrorGlobal(`No se pudieron cargar los clientes: ${error.message}`);
         } else if (activo) {
-          setClientes((data as Cliente[]) ?? []);
+          const lista = (data as Cliente[]) ?? [];
+          setClientes(lista);
+          const params = new URLSearchParams(window.location.search);
+          const clienteId = params.get("cliente_id");
+          if (clienteId) {
+            const coincide = lista.find((c) => c.id === clienteId);
+            if (coincide) {
+              setClienteSeleccionado(coincide);
+              setBusquedaCliente("");
+            }
+          }
         }
       }
       if (activo) setCargandoClientes(false);
