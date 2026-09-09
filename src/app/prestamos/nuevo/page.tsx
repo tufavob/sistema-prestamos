@@ -5,10 +5,9 @@ import Link from "next/link";
 import {
   createClient,
   hasAuthConfig,
-  tieneDeudaActiva,
+  obtenerSaldoPendienteCliente,
   type Cliente,
 } from "@/lib/supabase";
-import DeudaActivaModal from "@/components/DeudaActivaModal";
 import {
   aYMD,
   calcularPrestamo,
@@ -33,6 +32,7 @@ type FormErrors = {
   interes?: string;
   cuotas?: string;
   fecha?: string;
+  liquidar?: string;
 };
 
 const nombreCompleto = (c: Cliente) => `${c.nombres} ${c.apellidos}`;
@@ -58,7 +58,8 @@ export default function NuevoPrestamo() {
   const [mensaje, setMensaje] = useState<string | null>(null);
 
   const [verificando, setVerificando] = useState<string | null>(null);
-  const [clienteDeuda, setClienteDeuda] = useState<Cliente | null>(null);
+  const [saldoPendiente, setSaldoPendiente] = useState(0);
+  const [liquidarSaldo, setLiquidarSaldo] = useState(false);
 
   useEffect(() => {
     let activo = true;
@@ -78,11 +79,10 @@ export default function NuevoPrestamo() {
           if (clienteId) {
             const coincide = lista.find((c) => c.id === clienteId);
             if (coincide) {
-              const conDeuda = await tieneDeudaActiva(supabase, coincide.id);
-              if (conDeuda) {
-                setClienteDeuda(coincide);
-              } else {
+              const saldo = await obtenerSaldoPendienteCliente(supabase, coincide.id);
+              if (activo) {
                 setClienteSeleccionado(coincide);
+                setSaldoPendiente(saldo);
                 setBusquedaCliente("");
               }
             }
@@ -144,22 +144,22 @@ export default function NuevoPrestamo() {
   const seleccionarCliente = async (c: Cliente) => {
     if (!supabase) {
       setClienteSeleccionado(c);
+      setSaldoPendiente(0);
+      setLiquidarSaldo(false);
       setBusquedaCliente("");
       setDropdownAbierto(false);
-      setErrors((prev) => ({ ...prev, cliente: undefined }));
+      setErrors((prev) => ({ ...prev, cliente: undefined, liquidar: undefined }));
       return;
     }
     setVerificando(c.id);
-    const conDeuda = await tieneDeudaActiva(supabase, c.id);
+    const saldo = await obtenerSaldoPendienteCliente(supabase, c.id);
     setVerificando(null);
-    if (conDeuda) {
-      setClienteDeuda(c);
-      return;
-    }
     setClienteSeleccionado(c);
+    setSaldoPendiente(saldo);
+    setLiquidarSaldo(false);
     setBusquedaCliente("");
     setDropdownAbierto(false);
-    setErrors((prev) => ({ ...prev, cliente: undefined }));
+    setErrors((prev) => ({ ...prev, cliente: undefined, liquidar: undefined }));
   };
 
   const aDosDecimales = (n: number) => Math.round(n * 100) / 100;
@@ -181,6 +181,10 @@ export default function NuevoPrestamo() {
     if (!numeroCuotas || !Number.isInteger(c) || c <= 0 || c > 60)
       e.cuotas = "Ingresa un número de cuotas entre 1 y 60.";
     if (!fechaInicio) e.fecha = "Selecciona la fecha de inicio.";
+    if (saldoPendiente > 0 && !liquidarSaldo)
+      e.liquidar = `El cliente tiene un saldo pendiente de ${formatearMoneda(
+        saldoPendiente,
+      )}. Marca la casilla para liquidarlo con este nuevo préstamo.`;
     return e;
   };
 
@@ -200,27 +204,28 @@ export default function NuevoPrestamo() {
 
     setEnviando(true);
     setErrorGlobal(null);
-    setVerificando(clienteSeleccionado.id);
-    const conDeuda = await tieneDeudaActiva(supabase, clienteSeleccionado.id);
-    setVerificando(null);
-    if (conDeuda) {
-      setEnviando(false);
-      setClienteDeuda(clienteSeleccionado);
-      return;
-    }
-    const { data, error } = await supabase.rpc("registrar_prestamo", {
+    const liquidar = liquidarSaldo && saldoPendiente > 0;
+    const params = {
       p_cliente_id: clienteSeleccionado.id,
       p_monto: aDosDecimales(Number(monto)),
       p_interes_porcentaje: aDosDecimales(Number(interes)),
       p_frecuencia: frecuencia,
       p_numero_cuotas: Number(numeroCuotas),
       p_fecha_inicio: fechaInicio,
-    });
+    };
+    const { data, error } = liquidar
+      ? await supabase.rpc("liquidar_y_registrar_prestamo", {
+          ...params,
+          p_fecha_liquidacion: aYMD(hoyLocal()),
+        })
+      : await supabase.rpc("registrar_prestamo", params);
     setEnviando(false);
 
     if (error) {
       if (error.message.toLowerCase().includes("vigente")) {
-        setClienteDeuda(clienteSeleccionado);
+        setErrorGlobal(
+          `El cliente tiene un préstamo vigente con cuotas pendientes. Marca la casilla "Liquidar saldo pendiente" para renovarlo.`,
+        );
       } else {
         setErrorGlobal(
           `No se pudo generar el préstamo: ${error.message}${
@@ -234,13 +239,19 @@ export default function NuevoPrestamo() {
     }
 
     setMensaje(
-      `Préstamo generado correctamente para ${nombreCompleto(clienteSeleccionado)} (ID: ${String(data).slice(0, 8)}…).`,
+      liquidar
+        ? `Préstamo generado y saldo anterior liquidado para ${nombreCompleto(
+            clienteSeleccionado,
+          )} (ID: ${String(data).slice(0, 8)}…).`
+        : `Préstamo generado correctamente para ${nombreCompleto(clienteSeleccionado)} (ID: ${String(data).slice(0, 8)}…).`,
     );
     setMonto("");
     setInteres("");
     setNumeroCuotas("");
     setFechaInicio(aYMD(hoyLocal()));
     setClienteSeleccionado(null);
+    setSaldoPendiente(0);
+    setLiquidarSaldo(false);
     setErrors({});
   };
 
@@ -324,8 +335,14 @@ export default function NuevoPrestamo() {
                   onChange={(e) => {
                     setBusquedaCliente(e.target.value);
                     setClienteSeleccionado(null);
+                    setSaldoPendiente(0);
+                    setLiquidarSaldo(false);
                     setDropdownAbierto(true);
-                    setErrors((prev) => ({ ...prev, cliente: undefined }));
+                    setErrors((prev) => ({
+                      ...prev,
+                      cliente: undefined,
+                      liquidar: undefined,
+                    }));
                   }}
                   onFocus={() => setDropdownAbierto(true)}
                   placeholder={cargandoClientes ? "Cargando clientes..." : "Buscar por DNI o nombre..."}
@@ -394,6 +411,34 @@ export default function NuevoPrestamo() {
                 <p className="mt-1 text-xs text-red-600 dark:text-red-400">{errors.cliente}</p>
               )}
             </div>
+
+            {clienteSeleccionado && saldoPendiente > 0 && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950">
+                <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
+                  El cliente tiene un saldo pendiente de{" "}
+                  {formatearMoneda(saldoPendiente)} en préstamos anteriores.
+                </p>
+                <label className="mt-3 flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={liquidarSaldo}
+                    onChange={(e) => {
+                      setLiquidarSaldo(e.target.checked);
+                      setErrors((prev) => ({ ...prev, liquidar: undefined }));
+                    }}
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-300 accent-zinc-900 dark:accent-zinc-100"
+                  />
+                  <span className="text-sm text-amber-900 dark:text-amber-200">
+                    Liquidar saldo pendiente con este nuevo préstamo
+                  </span>
+                </label>
+                {errors.liquidar && (
+                  <p className="mt-2 text-xs font-medium text-red-600 dark:text-red-400">
+                    {errors.liquidar}
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Monto e interés */}
             <div className="grid gap-4 sm:grid-cols-2">
@@ -518,6 +563,8 @@ export default function NuevoPrestamo() {
                   <Spinner />
                   Generando préstamo...
                 </>
+              ) : liquidarSaldo && saldoPendiente > 0 ? (
+                "Liquidar y Generar Préstamo"
               ) : (
                 "Generar Préstamo"
               )}
@@ -589,6 +636,34 @@ export default function NuevoPrestamo() {
                 </div>
               </dl>
 
+              {liquidarSaldo && saldoPendiente > 0 && (
+                <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950">
+                  <p className="text-xs font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                    Liquidación incluida
+                  </p>
+                  <dl className="mt-2 space-y-1 text-sm">
+                    <div className="flex items-center justify-between text-amber-900 dark:text-amber-200">
+                      <dt>Monto del préstamo</dt>
+                      <dd className="font-semibold">{formatearMoneda(calculo.monto)}</dd>
+                    </div>
+                    <div className="flex items-center justify-between text-amber-900 dark:text-amber-200">
+                      <dt>Saldo a liquidar</dt>
+                      <dd className="font-medium">
+                        − {formatearMoneda(saldoPendiente)}
+                      </dd>
+                    </div>
+                    <div className="flex items-center justify-between border-t border-amber-300 pt-1.5 text-amber-900 dark:border-amber-800 dark:text-amber-200">
+                      <dt className="font-medium">Monto Neto a Entregar</dt>
+                      <dd className="text-base font-bold">
+                        {formatearMoneda(
+                          Math.max(calculo.monto - saldoPendiente, 0),
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              )}
+
               <h3 className="mb-2 mt-6 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
                 Cronograma de pagos
                 <span className="ml-2 rounded-full bg-zinc-200 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -630,11 +705,6 @@ export default function NuevoPrestamo() {
           )}
         </section>
       </div>
-
-      <DeudaActivaModal
-        cliente={clienteDeuda}
-        onClose={() => setClienteDeuda(null)}
-      />
     </main>
   );
 }

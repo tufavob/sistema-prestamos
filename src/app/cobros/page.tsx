@@ -28,7 +28,7 @@ type Cobro = {
   numero: number;
   monto: number;
   fecha_vencimiento: string;
-  estado: "pendiente" | "parcial" | "vencido";
+  estado: "pendiente" | "parcial" | "vencido" | "pagado";
   saldo_pendiente: number;
   prestamos: {
     numero_cuotas: number;
@@ -140,27 +140,13 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
       .select(
         "id, numero, monto, fecha_vencimiento, estado, saldo_pendiente, prestamos!inner(numero_cuotas, clientes!inner(nombres, apellidos, telefono, direccion, referencia))",
       )
-      .lte("fecha_vencimiento", hoy)
-      .in("estado", ["pendiente", "parcial", "vencido"])
+      .eq("fecha_vencimiento", hoy)
+      .in("estado", ["pendiente", "parcial", "vencido", "pagado"])
       .order("fecha_vencimiento", { ascending: true });
-
-    const { data: pagosData, error: pagosError } = await supabase
-      .from("pagos")
-      .select("monto")
-      .eq("fecha_pago", hoy);
 
     if (cuotasError) {
       return {
         error: `No se pudieron cargar los cobros: ${cuotasError.message}. Revisa que la tabla "cuotas" tenga la columna fecha_vencimiento (migración 02).`,
-        cobros: [],
-        totalACobrar: 0,
-        totalRecaudado: 0,
-        hoy,
-      };
-    }
-    if (pagosError) {
-      return {
-        error: `No se pudo cargar el resumen del día: ${pagosError.message}`,
         cobros: [],
         totalACobrar: 0,
         totalRecaudado: 0,
@@ -172,9 +158,13 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     return {
       error: null,
       cobros: cuotas,
-      totalACobrar: cuotas.reduce((s, c) => s + Number(c.saldo_pendiente), 0),
-      totalRecaudado: ((pagosData as { monto: number }[] | null) ?? []).reduce(
-        (s, p) => s + Number(p.monto),
+      totalACobrar: cuotas.reduce(
+        (s, c) =>
+          c.estado === "pendiente" ? s + Number(c.monto) : s,
+        0,
+      ),
+      totalRecaudado: cuotas.reduce(
+        (s, c) => (c.estado === "pagado" ? s + Number(c.monto) : s),
         0,
       ),
       hoy,
@@ -478,7 +468,9 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
             {formatearMoneda(totalACobrar)}
           </p>
           <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-            {cobros.length} cuota{cobros.length === 1 ? "" : "s"} al día o vencida
+            {cobros.filter((c) => c.estado !== "pagado").length} cuota
+            {cobros.filter((c) => c.estado !== "pagado").length === 1 ? "" : "s"} por cobrar
+            hoy
           </p>
         </div>
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 shadow-sm dark:border-emerald-900 dark:bg-emerald-950">
@@ -495,7 +487,9 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
             />
           </div>
           <p className="mt-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
-            {progresoHoy}% de lo pendiente
+            {cobros.filter((c) => c.estado === "pagado").length} cuota
+            {cobros.filter((c) => c.estado === "pagado").length === 1 ? "" : "s"} cobrada
+            {cobros.filter((c) => c.estado === "pagado").length === 1 ? "" : "s"} hoy
           </p>
         </div>
       </section>
@@ -516,14 +510,16 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
         </div>
       ) : (
         <ul className="flex flex-col gap-4 sm:grid sm:grid-cols-2 sm:gap-4">
-          {cobros.map((c) => {
+          {cobros.map((c, i) => {
             const cliente = c.prestamos?.clientes;
             const saldo = Number(c.saldo_pendiente);
             const monto = Number(c.monto);
-            const pagado = monto - saldo;
-            const parcial = c.estado === "parcial";
-            const vencida = c.fecha_vencimiento < fechaHoy;
-            const pctCuota = monto > 0 ? Math.min(100, Math.round((pagado / monto) * 100)) : 0;
+            const pagado = c.estado === "pagado";
+            const montoPagadoCuota = monto - saldo;
+            const parcial = !pagado && c.estado === "parcial";
+            const vencida = !pagado && c.fecha_vencimiento < fechaHoy;
+            const pctCuota =
+              monto > 0 ? Math.min(100, Math.round((montoPagadoCuota / monto) * 100)) : 0;
 
             return (
               <li
@@ -586,13 +582,13 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                       )}
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
-                      {cliente?.telefono && (
+                      {!pagado && cliente?.telefono && (
                         <a
                           href={crearLinkWhatsApp(
                             cliente.telefono,
                             mensajeRecordatorio({
                               nombres: nombreCompleto(cliente),
-                              numeroCuota: c.numero,
+                              numeroCuota: i + 1,
                               monto,
                             }),
                           )}
@@ -607,12 +603,14 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                       )}
                       <span
                         className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
-                          vencida
-                            ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
-                            : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                          pagado
+                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                            : vencida
+                              ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+                              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                         }`}
                       >
-                        {vencida ? "Vencida" : "Hoy"}
+                        {pagado ? "✓ Pagado" : vencida ? "Vencida" : "Hoy"}
                       </span>
                     </div>
                   </div>
@@ -621,7 +619,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                 <div className="flex items-center justify-between rounded-xl bg-zinc-50 px-3.5 py-2.5 dark:bg-zinc-800/60">
                   <div>
                     <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                      {`Cuota ${c.numero} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
+                      {`Cuota ${i + 1} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
                       {formatearFechaDB(c.fecha_vencimiento)}
                     </p>
                     <p className="text-base font-bold text-zinc-900 dark:text-zinc-50">
@@ -630,16 +628,22 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                   </div>
                   <div className="text-right">
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      {parcial ? "Saldo pendiente" : "Saldo a cobrar"}
+                      {parcial
+                        ? "Saldo pendiente"
+                        : pagado
+                          ? "Monto cobrado"
+                          : "Saldo a cobrar"}
                     </p>
                     <p
                       className={`text-base font-bold ${
                         parcial
                           ? "text-amber-600 dark:text-amber-400"
-                          : "text-zinc-900 dark:text-zinc-50"
+                          : pagado
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-zinc-900 dark:text-zinc-50"
                       }`}
                     >
-                      {formatearMoneda(saldo)}
+                      {pagado ? formatearMoneda(monto) : formatearMoneda(saldo)}
                     </p>
                   </div>
                 </div>
@@ -648,7 +652,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                   <div>
                     <div className="mb-1 flex justify-between text-[11px] text-zinc-500 dark:text-zinc-400">
                       <span>
-                        Pagado {formatearMoneda(pagado)} de {formatearMoneda(monto)}
+                        Pagado {formatearMoneda(montoPagadoCuota)} de {formatearMoneda(monto)}
                       </span>
                       <span>{pctCuota}%</span>
                     </div>
@@ -661,7 +665,24 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                   </div>
                 )}
 
-                <div className="mt-auto flex flex-col gap-2">
+                {pagado ? (
+                  <div className="mt-auto flex items-center justify-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2.5 text-sm font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                    <svg
+                      className="h-4 w-4"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M20 6 9 17l-5-5" />
+                    </svg>
+                    Cuota cobrada
+                  </div>
+                ) : (
+                  <div className="mt-auto flex flex-col gap-2">
                   {abonoAbierto === c.id && (
                     <form
                       onSubmit={(e) => {
@@ -757,7 +778,8 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                       )}
                     </button>
                   </div>
-                </div>
+                  </div>
+                )}
               </li>
             );
           })}

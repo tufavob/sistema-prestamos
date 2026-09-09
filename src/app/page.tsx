@@ -6,11 +6,9 @@ import { useRouter } from "next/navigation";
 import {
   createClient,
   hasAuthConfig,
-  tieneDeudaActiva,
   type Cliente,
 } from "@/lib/supabase";
 import Modal from "@/components/Modal";
-import DeudaActivaModal from "@/components/DeudaActivaModal";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -62,9 +60,6 @@ export default function Home() {
   const [enviando, setEnviando] = useState(false);
   const [errorGlobal, setErrorGlobal] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
-
-  const [verificando, setVerificando] = useState(false);
-  const [clienteDeuda, setClienteDeuda] = useState<Cliente | null>(null);
 
   const [editando, setEditando] = useState<Cliente | null>(null);
   const [editForm, setEditForm] = useState<FormState>(EMPTY_FORM);
@@ -176,19 +171,8 @@ export default function Home() {
     );
   }, [clientes, query]);
 
-  const iniciarNuevoPrestamo = async (cliente: Cliente) => {
-    if (!supabase) return;
-    setVerificando(true);
-    try {
-      const conDeuda = await tieneDeudaActiva(supabase, cliente.id);
-      if (conDeuda) {
-        setClienteDeuda(cliente);
-      } else {
-        router.push(`/prestamos/nuevo?cliente_id=${cliente.id}`);
-      }
-    } finally {
-      setVerificando(false);
-    }
+  const iniciarNuevoPrestamo = (cliente: Cliente) => {
+    router.push(`/prestamos/nuevo?cliente_id=${cliente.id}`);
   };
 
   const abrirEdicion = (c: Cliente) => {
@@ -578,8 +562,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => iniciarNuevoPrestamo(c)}
-                      disabled={verificando}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
                     >
                       <svg
                         className="h-3.5 w-3.5"
@@ -593,7 +576,7 @@ export default function Home() {
                       >
                         <path d="M12 5v14M5 12h14" />
                       </svg>
-                      {verificando ? "Verificando…" : "Nuevo préstamo"}
+                      Nuevo préstamo
                     </button>
                   </div>
                 </li>
@@ -663,8 +646,7 @@ export default function Home() {
                           <button
                             type="button"
                             onClick={() => iniciarNuevoPrestamo(c)}
-                            disabled={verificando}
-                            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
                           >
                             <svg
                               className="h-3.5 w-3.5"
@@ -678,7 +660,7 @@ export default function Home() {
                             >
                               <path d="M12 5v14M5 12h14" />
                             </svg>
-                            {verificando ? "Verificando…" : "Nuevo préstamo"}
+                            Nuevo préstamo
                           </button>
                         </div>
                       </td>
@@ -831,11 +813,6 @@ export default function Home() {
           </div>
         </form>
       </Modal>
-
-      <DeudaActivaModal
-        cliente={clienteDeuda}
-        onClose={() => setClienteDeuda(null)}
-      />
     </main>
   );
 }

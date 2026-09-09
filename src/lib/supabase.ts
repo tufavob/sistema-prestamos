@@ -45,3 +45,25 @@ export async function tieneDeudaActiva(
 
   return (count ?? 0) > 0;
 }
+
+export async function obtenerSaldoPendienteCliente(
+  supabase: SupabaseClient,
+  clienteId: string,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from("cuotas")
+    .select("saldo_pendiente, prestamos!inner(cliente_id)")
+    .eq("prestamos.cliente_id", clienteId)
+    .neq("estado", "pagado");
+
+  if (error) {
+    console.error("Error consultando saldo pendiente:", error);
+    return 0;
+  }
+
+  const total = (data ?? []).reduce(
+    (suma, c) => suma + Number((c as { saldo_pendiente: number }).saldo_pendiente ?? 0),
+    0,
+  );
+  return Math.round(total * 100) / 100;
+}
