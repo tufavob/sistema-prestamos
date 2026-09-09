@@ -2,7 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { createClient, hasAuthConfig, type Cliente } from "@/lib/supabase";
+import {
+  createClient,
+  hasAuthConfig,
+  tieneDeudaActiva,
+  type Cliente,
+} from "@/lib/supabase";
+import DeudaActivaModal from "@/components/DeudaActivaModal";
 import {
   aYMD,
   calcularPrestamo,
@@ -51,6 +57,9 @@ export default function NuevoPrestamo() {
   const [errorGlobal, setErrorGlobal] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
 
+  const [verificando, setVerificando] = useState<string | null>(null);
+  const [clienteDeuda, setClienteDeuda] = useState<Cliente | null>(null);
+
   useEffect(() => {
     let activo = true;
     const cargar = async () => {
@@ -69,8 +78,13 @@ export default function NuevoPrestamo() {
           if (clienteId) {
             const coincide = lista.find((c) => c.id === clienteId);
             if (coincide) {
-              setClienteSeleccionado(coincide);
-              setBusquedaCliente("");
+              const conDeuda = await tieneDeudaActiva(supabase, coincide.id);
+              if (conDeuda) {
+                setClienteDeuda(coincide);
+              } else {
+                setClienteSeleccionado(coincide);
+                setBusquedaCliente("");
+              }
             }
           }
         }
@@ -127,7 +141,21 @@ export default function NuevoPrestamo() {
     return calcularPrestamo(m, i, frecuencia, c, fecha);
   }, [monto, interes, frecuencia, numeroCuotas, fechaInicio]);
 
-  const seleccionarCliente = (c: Cliente) => {
+  const seleccionarCliente = async (c: Cliente) => {
+    if (!supabase) {
+      setClienteSeleccionado(c);
+      setBusquedaCliente("");
+      setDropdownAbierto(false);
+      setErrors((prev) => ({ ...prev, cliente: undefined }));
+      return;
+    }
+    setVerificando(c.id);
+    const conDeuda = await tieneDeudaActiva(supabase, c.id);
+    setVerificando(null);
+    if (conDeuda) {
+      setClienteDeuda(c);
+      return;
+    }
     setClienteSeleccionado(c);
     setBusquedaCliente("");
     setDropdownAbierto(false);
@@ -172,6 +200,14 @@ export default function NuevoPrestamo() {
 
     setEnviando(true);
     setErrorGlobal(null);
+    setVerificando(clienteSeleccionado.id);
+    const conDeuda = await tieneDeudaActiva(supabase, clienteSeleccionado.id);
+    setVerificando(null);
+    if (conDeuda) {
+      setEnviando(false);
+      setClienteDeuda(clienteSeleccionado);
+      return;
+    }
     const { data, error } = await supabase.rpc("registrar_prestamo", {
       p_cliente_id: clienteSeleccionado.id,
       p_monto: aDosDecimales(Number(monto)),
@@ -183,13 +219,17 @@ export default function NuevoPrestamo() {
     setEnviando(false);
 
     if (error) {
-      setErrorGlobal(
-        `No se pudo generar el préstamo: ${error.message}${
-          error.message.toLowerCase().includes("function")
-            ? " Asegúrate de ejecutar la migración SQL en supabase/migrations."
-            : ""
-        }`,
-      );
+      if (error.message.toLowerCase().includes("vigente")) {
+        setClienteDeuda(clienteSeleccionado);
+      } else {
+        setErrorGlobal(
+          `No se pudo generar el préstamo: ${error.message}${
+            error.message.toLowerCase().includes("function")
+              ? " Asegúrate de ejecutar la migración SQL en supabase/migrations."
+              : ""
+          }`,
+        );
+      }
       return;
     }
 
@@ -309,9 +349,10 @@ export default function NuevoPrestamo() {
                         <li key={c.id}>
                           <button
                             type="button"
+                            disabled={verificando !== null}
                             onMouseDown={(e) => e.preventDefault()}
                             onClick={() => seleccionarCliente(c)}
-                            className={`flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-sm transition hover:bg-zinc-100 dark:hover:bg-zinc-800 ${
+                            className={`flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-sm transition hover:bg-zinc-100 disabled:cursor-wait dark:hover:bg-zinc-800 ${
                               clienteSeleccionado?.id === c.id
                                 ? "bg-zinc-100 dark:bg-zinc-800"
                                 : ""
@@ -589,6 +630,11 @@ export default function NuevoPrestamo() {
           )}
         </section>
       </div>
+
+      <DeudaActivaModal
+        cliente={clienteDeuda}
+        onClose={() => setClienteDeuda(null)}
+      />
     </main>
   );
 }

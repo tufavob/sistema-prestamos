@@ -2,7 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { createClient, hasAuthConfig, type Cliente } from "@/lib/supabase";
+import { useRouter } from "next/navigation";
+import {
+  createClient,
+  hasAuthConfig,
+  tieneDeudaActiva,
+  type Cliente,
+} from "@/lib/supabase";
+import Modal from "@/components/Modal";
+import DeudaActivaModal from "@/components/DeudaActivaModal";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -44,6 +52,7 @@ const formatFecha = (iso: string) =>
   });
 
 export default function Home() {
+  const router = useRouter();
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [errors, setErrors] = useState<FormErrors>({});
@@ -53,6 +62,15 @@ export default function Home() {
   const [enviando, setEnviando] = useState(false);
   const [errorGlobal, setErrorGlobal] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
+
+  const [verificando, setVerificando] = useState(false);
+  const [clienteDeuda, setClienteDeuda] = useState<Cliente | null>(null);
+
+  const [editando, setEditando] = useState<Cliente | null>(null);
+  const [editForm, setEditForm] = useState<FormState>(EMPTY_FORM);
+  const [editErrors, setEditErrors] = useState<FormErrors>({});
+  const [guardandoEdicion, setGuardandoEdicion] = useState(false);
+  const [errorEdicion, setErrorEdicion] = useState<string | null>(null);
 
   useEffect(() => {
     let activo = true;
@@ -157,6 +175,103 @@ export default function Home() {
         `${c.nombres} ${c.apellidos}`.toLowerCase().includes(q),
     );
   }, [clientes, query]);
+
+  const iniciarNuevoPrestamo = async (cliente: Cliente) => {
+    if (!supabase) return;
+    setVerificando(true);
+    try {
+      const conDeuda = await tieneDeudaActiva(supabase, cliente.id);
+      if (conDeuda) {
+        setClienteDeuda(cliente);
+      } else {
+        router.push(`/prestamos/nuevo?cliente_id=${cliente.id}`);
+      }
+    } finally {
+      setVerificando(false);
+    }
+  };
+
+  const abrirEdicion = (c: Cliente) => {
+    setEditando(c);
+    setEditForm({
+      dni: c.dni,
+      nombres: c.nombres,
+      apellidos: c.apellidos,
+      telefono: c.telefono ?? "",
+      direccion: c.direccion ?? "",
+      referencia: c.referencia ?? "",
+    });
+    setEditErrors({});
+    setErrorEdicion(null);
+  };
+
+  const cerrarEdicion = () => {
+    if (guardandoEdicion) return;
+    setEditando(null);
+    setEditForm(EMPTY_FORM);
+    setEditErrors({});
+    setErrorEdicion(null);
+  };
+
+  const handleEditChange =
+    (campo: keyof FormState) =>
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setEditForm((prev) => ({ ...prev, [campo]: e.target.value }));
+      setEditErrors((prev) => (prev[campo] ? { ...prev, [campo]: undefined } : prev));
+    };
+
+  const guardarEdicion = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!supabase || !editando) return;
+    setErrorEdicion(null);
+
+    const errores = validar(editForm);
+    setEditErrors(errores);
+    if (Object.values(errores).some(Boolean)) return;
+
+    setGuardandoEdicion(true);
+    const { error } = await supabase
+      .from("clientes")
+      .update({
+        dni: editForm.dni.trim(),
+        nombres: editForm.nombres.trim(),
+        apellidos: editForm.apellidos.trim(),
+        telefono: editForm.telefono.trim() || null,
+        direccion: editForm.direccion.trim() || null,
+        referencia: editForm.referencia.trim() || null,
+      })
+      .eq("id", editando.id);
+
+    setGuardandoEdicion(false);
+    if (error) {
+      setErrorEdicion(
+        error.code === "23505"
+          ? "Ya existe otro cliente registrado con ese DNI."
+          : `No se pudo actualizar el cliente: ${error.message}`,
+      );
+      return;
+    }
+
+    const editado = editando.id;
+    setClientes((prev) =>
+      prev.map((c) =>
+        c.id === editado
+          ? {
+              ...c,
+              dni: editForm.dni.trim(),
+              nombres: editForm.nombres.trim(),
+              apellidos: editForm.apellidos.trim(),
+              telefono: editForm.telefono.trim() || null,
+              direccion: editForm.direccion.trim() || null,
+              referencia: editForm.referencia.trim() || null,
+            }
+          : c,
+      ),
+    );
+    setEditando(null);
+    setEditForm(EMPTY_FORM);
+    setMensaje("Cliente actualizado correctamente.");
+  };
 
   return (
     <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-8 px-4 py-8 sm:px-6">
@@ -439,10 +554,32 @@ export default function Home() {
                       Registrado el {formatFecha(c.created_at)}
                     </dd>
                   </dl>
-                  <div className="mt-3">
-                    <Link
-                      href={`/prestamos/nuevo?cliente_id=${c.id}`}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => abrirEdicion(c)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      <svg
+                        className="h-3.5 w-3.5"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                        <path d="m15 5 4 4" />
+                      </svg>
+                      Editar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => iniciarNuevoPrestamo(c)}
+                      disabled={verificando}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
                     >
                       <svg
                         className="h-3.5 w-3.5"
@@ -456,8 +593,8 @@ export default function Home() {
                       >
                         <path d="M12 5v14M5 12h14" />
                       </svg>
-                      Nuevo préstamo
-                    </Link>
+                      {verificando ? "Verificando…" : "Nuevo préstamo"}
+                    </button>
                   </div>
                 </li>
               ))}
@@ -502,24 +639,48 @@ export default function Home() {
                         {formatFecha(c.created_at)}
                       </td>
                       <td className="p-3 text-center">
-                        <Link
-                          href={`/prestamos/nuevo?cliente_id=${c.id}`}
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
-                        >
-                          <svg
-                            className="h-3.5 w-3.5"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            aria-hidden="true"
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => abrirEdicion(c)}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
                           >
-                            <path d="M12 5v14M5 12h14" />
-                          </svg>
-                          Nuevo préstamo
-                        </Link>
+                            <svg
+                              className="h-3.5 w-3.5"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden="true"
+                            >
+                              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                              <path d="m15 5 4 4" />
+                            </svg>
+                            Editar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => iniciarNuevoPrestamo(c)}
+                            disabled={verificando}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+                          >
+                            <svg
+                              className="h-3.5 w-3.5"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden="true"
+                            >
+                              <path d="M12 5v14M5 12h14" />
+                            </svg>
+                            {verificando ? "Verificando…" : "Nuevo préstamo"}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -529,6 +690,152 @@ export default function Home() {
           </>
         )}
       </section>
+
+      <Modal open={editando !== null} onClose={cerrarEdicion}>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+              Editar cliente
+            </h3>
+            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+              Actualiza los datos de contacto del cliente.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={cerrarEdicion}
+            aria-label="Cerrar"
+            className="rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+          >
+            <svg
+              className="h-5 w-5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={guardarEdicion} noValidate className="mt-4 flex flex-col gap-4">
+          {errorEdicion && (
+            <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
+              {errorEdicion}
+            </div>
+          )}
+
+          <div>
+            <label htmlFor="edit-nombres" className={labelCls}>
+              Nombres <span className="text-red-500">*</span>
+            </label>
+            <input
+              id="edit-nombres"
+              type="text"
+              className={inputCls}
+              value={editForm.nombres}
+              onChange={handleEditChange("nombres")}
+              aria-invalid={Boolean(editErrors.nombres)}
+            />
+            {editErrors.nombres && (
+              <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {editErrors.nombres}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label htmlFor="edit-apellidos" className={labelCls}>
+              Apellidos <span className="text-red-500">*</span>
+            </label>
+            <input
+              id="edit-apellidos"
+              type="text"
+              className={inputCls}
+              value={editForm.apellidos}
+              onChange={handleEditChange("apellidos")}
+              aria-invalid={Boolean(editErrors.apellidos)}
+            />
+            {editErrors.apellidos && (
+              <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {editErrors.apellidos}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label htmlFor="edit-telefono" className={labelCls}>
+              Teléfono
+            </label>
+            <input
+              id="edit-telefono"
+              type="tel"
+              inputMode="tel"
+              className={inputCls}
+              value={editForm.telefono}
+              onChange={handleEditChange("telefono")}
+              aria-invalid={Boolean(editErrors.telefono)}
+            />
+            {editErrors.telefono && (
+              <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {editErrors.telefono}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label htmlFor="edit-direccion" className={labelCls}>
+              Dirección
+            </label>
+            <input
+              id="edit-direccion"
+              type="text"
+              className={inputCls}
+              value={editForm.direccion}
+              onChange={handleEditChange("direccion")}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="edit-referencia" className={labelCls}>
+              Referencia
+            </label>
+            <input
+              id="edit-referencia"
+              type="text"
+              className={inputCls}
+              value={editForm.referencia}
+              onChange={handleEditChange("referencia")}
+            />
+          </div>
+
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={cerrarEdicion}
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 px-4 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={guardandoEdicion}
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-slate-900 px-5 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-300"
+            >
+              {guardandoEdicion ? "Guardando..." : "Guardar cambios"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <DeudaActivaModal
+        cliente={clienteDeuda}
+        onClose={() => setClienteDeuda(null)}
+      />
     </main>
   );
 }
