@@ -74,7 +74,14 @@ const leerMetricas = (data: unknown): MetricasLeidas => {
     return undefined;
   };
   return {
-    recaudoDia: numero(primeroDe("recaudo_dia", "recaudoDia")),
+    recaudoDia: numero(
+      primeroDe(
+        "recaudo_dia",
+        "recaudado_hoy",
+        "recaudoDia",
+        "recaudadoHoy",
+      ),
+    ),
     capitalCalle: numero(
       primeroDe("capital_en_calle", "capital_calle", "capitalEnCalle"),
     ),
@@ -138,7 +145,7 @@ export default function Dashboard() {
 
     try {
       const [metricasRes, moraRes] = await Promise.all([
-        supabase.rpc("metricas_dashboard", { p_hoy: hoy }),
+        supabase.rpc("metricas_dashboard"),
         supabase
           .from("cuotas")
           .select(
@@ -147,6 +154,8 @@ export default function Dashboard() {
           .lt("fecha_vencimiento", hoy)
           .in("estado", ESTADOS_POR_COBRAR),
       ]);
+
+      console.log("Metricas desde Supabase:", metricasRes.data);
 
       if (metricasRes.error) {
         console.error("Error desde Supabase RPC:", metricasRes.error);
