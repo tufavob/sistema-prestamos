@@ -376,41 +376,49 @@ export default function DetallePrestamo({
                 <thead className="border-b border-slate-200 bg-slate-100 font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-200">
                   <tr>
                     <th className="p-3 text-center">N° Cuota</th>
-                    <th className="p-3">Fecha Vencimiento</th>
-                    <th className="p-3">Monto</th>
-                    <th className="p-3">Estado</th>
+                    <th className="p-3 text-left">Fecha Vencimiento</th>
+                    <th className="p-3 text-left">Monto</th>
+                    <th className="p-3 text-left">Estado</th>
                     <th className="p-3 text-center">Acciones</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {cuotas.map((cuota) => {
+                  {cuotas.map((cuota, index) => {
                     const ec = estadoCuota(cuota.estado);
                     const pagada = cuota.estado.toLowerCase() === "pagado";
                     const cliente = primero(prestamo.clientes);
                     return (
                       <tr
-                        key={cuota.id}
+                        key={cuota.id || index}
                         className="border-b border-slate-100 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-zinc-800/40"
                       >
                         <td className="p-3 text-center font-medium text-zinc-900 dark:text-zinc-50">
-                          {cuota.numero}
+                          {cuota.numero || index + 1}
                         </td>
                         <td className="p-3 text-zinc-600 dark:text-zinc-300">
                           {formatearFechaDB(cuota.fecha_vencimiento)}
                         </td>
-                        <td className="p-3 font-medium text-zinc-900 dark:text-zinc-50">
-                          {formatearMoneda(Number(cuota.monto))}
+                        <td className="p-3 font-semibold text-zinc-900 dark:text-zinc-50">
+                          S/ {Number(cuota.monto).toFixed(2)}
                         </td>
                         <td className="p-3">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${ec.cls}`}
-                          >
-                            {ec.label}
-                          </span>
-                          {cuota.estado === "parcial" && (
-                            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                              Saldo: {formatearMoneda(Number(cuota.saldo_pendiente))}
-                            </p>
+                          {pagada ? (
+                            <span className="font-medium text-green-600 dark:text-green-400">
+                              ✓ Pagado
+                            </span>
+                          ) : (
+                            <>
+                              <span
+                                className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${ec.cls}`}
+                              >
+                                {ec.label}
+                              </span>
+                              {cuota.estado === "parcial" && (
+                                <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                                  Saldo: {formatearMoneda(Number(cuota.saldo_pendiente))}
+                                </p>
+                              )}
+                            </>
                           )}
                         </td>
                         <td className="p-3 text-center">
@@ -434,11 +442,7 @@ export default function DetallePrestamo({
                                 <WhatsAppIcon className="h-4 w-4" />
                               </a>
                             )}
-                            {pagada ? (
-                              <span className="font-medium text-green-600 dark:text-green-400">
-                                ✓ Pagado
-                              </span>
-                            ) : (
+                            {!pagada && (
                               <button
                                 type="button"
                                 onClick={() => registrarPago(cuota)}
