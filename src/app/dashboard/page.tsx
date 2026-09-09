@@ -144,7 +144,7 @@ export default function Dashboard() {
     });
 
     try {
-      const [metricasRes, moraRes, pagosRes] = await Promise.all([
+      const [metricasRes, moraRes, cuotasPagadasRes] = await Promise.all([
         supabase.rpc("metricas_dashboard"),
         supabase
           .from("cuotas")
@@ -153,7 +153,10 @@ export default function Dashboard() {
           )
           .lt("fecha_vencimiento", hoy)
           .in("estado", ESTADOS_POR_COBRAR),
-        supabase.from("pagos").select("monto, created_at").eq("fecha_pago", hoy),
+        supabase
+          .from("cuotas")
+          .select("monto, monto_pagado, estado")
+          .eq("estado", "pagado"),
       ]);
 
       console.log("Metricas desde Supabase:", metricasRes.data);
@@ -170,34 +173,21 @@ export default function Dashboard() {
       const met = leerMetricas(metricasRaw);
 
       let recaudoDelDia = 0;
-      const pagos = (pagosRes.data ?? []) as {
+      const cuotasPagadas = (cuotasPagadasRes.data ?? []) as {
         monto: number;
-        created_at: string | null;
+        monto_pagado: number | null;
+        estado: string;
       }[];
-      const cuotas = (moraRes.data ?? []) as Record<string, unknown>[];
-      if (pagosRes.error) {
-        console.error("Error cargando pagos del día:", pagosRes.error);
+      if (cuotasPagadasRes.error) {
+        console.error("Error cargando cuotas pagadas:", cuotasPagadasRes.error);
       } else {
-        recaudoDelDia =
-          pagos && pagos.length > 0
-            ? pagos.reduce((sum, pago) => {
-                const fechaPago = pago.created_at
-                  ? new Date(pago.created_at).toLocaleDateString("sv-SE")
-                  : hoy;
-                return fechaPago === hoy ? sum + Number(pago.monto || 0) : sum;
-              }, 0)
-            : cuotas.reduce((sum, cuota) => {
-                if (String(cuota.estado).toLowerCase() === "pagado") {
-                  const fechaCuota = cuota.fecha_pago
-                    ? new Date(String(cuota.fecha_pago)).toLocaleDateString("sv-SE")
-                    : hoy;
-                  return fechaCuota === hoy
-                    ? sum +
-                        Number((cuota.monto_pagado as number) || (cuota.monto as number) || 0)
-                    : sum;
-                }
-                return sum;
-              }, 0);
+        recaudoDelDia = cuotasPagadas.reduce((total, cuota) => {
+          const estado = (cuota.estado || "").toString().toLowerCase();
+          if (estado === "pagado") {
+            return total + Number(cuota.monto_pagado || cuota.monto || 0);
+          }
+          return total;
+        }, 0);
       }
 
       const moraMap = new Map<string, MoraCliente>();
@@ -394,8 +384,8 @@ export default function Dashboard() {
               <p className="text-xs font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
                 Recaudo del día
               </p>
-              <p className="mt-1 text-2xl font-bold">
-                S/ {recaudoDelDia.toFixed(2)}
+              <p className="text-2xl font-bold">
+                S/ {Number(recaudoDelDia).toFixed(2)}
               </p>
               <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
                 Cobrado hoy
