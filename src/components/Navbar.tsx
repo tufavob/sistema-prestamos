@@ -1,7 +1,12 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import type { Session } from "@supabase/supabase-js";
+import { createClient, hasAuthConfig } from "@/lib/supabase";
+
+const supabase = hasAuthConfig ? createClient() : null;
 
 const ENLACES = [
   { href: "/dashboard", label: "Dashboard" },
@@ -12,6 +17,31 @@ const ENLACES = [
 
 export default function Navbar() {
   const pathname = usePathname();
+  const router = useRouter();
+
+  const [sesion, setSesion] = useState<Session | null>(null);
+
+  useEffect(() => {
+    if (!supabase) return;
+    let activo = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (activo) setSesion(data.session);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+      if (activo) setSesion(s);
+    });
+    return () => {
+      activo = false;
+      sub.subscription.unsubscribe();
+    };
+  }, []);
+
+  const cerrarSesion = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    router.push("/login");
+    router.refresh();
+  };
 
   const estaActivo = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
@@ -47,6 +77,16 @@ export default function Navbar() {
             </Link>
           ))}
         </div>
+
+        {sesion && (
+          <button
+            type="button"
+            onClick={cerrarSesion}
+            className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+          >
+            Cerrar sesión
+          </button>
+        )}
       </nav>
     </header>
   );

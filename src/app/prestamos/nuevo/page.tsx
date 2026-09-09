@@ -124,15 +124,21 @@ export default function NuevoPrestamo() {
     setErrors((prev) => ({ ...prev, cliente: undefined }));
   };
 
+  const aDosDecimales = (n: number) => Math.round(n * 100) / 100;
+
   const validar = (): FormErrors => {
     const e: FormErrors = {};
     if (!clienteSeleccionado) e.cliente = "Selecciona un cliente.";
     const m = Number(monto);
     if (!monto || !Number.isFinite(m) || m <= 0)
       e.monto = "Ingresa un monto mayor a cero.";
+    else if (aDosDecimales(m) !== m)
+      e.monto = "El monto debe tener máximo dos decimales.";
     const i = Number(interes);
     if (!interes || !Number.isFinite(i) || i < 0)
       e.interes = "Ingresa un porcentaje igual o mayor a cero.";
+    else if (aDosDecimales(i) !== i)
+      e.interes = "El interés debe tener máximo dos decimales.";
     const c = Number(numeroCuotas);
     if (!numeroCuotas || !Number.isInteger(c) || c <= 0 || c > 60)
       e.cuotas = "Ingresa un número de cuotas entre 1 y 60.";
@@ -158,8 +164,8 @@ export default function NuevoPrestamo() {
     setErrorGlobal(null);
     const { data, error } = await supabase.rpc("registrar_prestamo", {
       p_cliente_id: clienteSeleccionado.id,
-      p_monto: Number(monto),
-      p_interes_porcentaje: Number(interes),
+      p_monto: aDosDecimales(Number(monto)),
+      p_interes_porcentaje: aDosDecimales(Number(interes)),
       p_frecuencia: frecuencia,
       p_numero_cuotas: Number(numeroCuotas),
       p_fecha_inicio: fechaInicio,

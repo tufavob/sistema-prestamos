@@ -24,6 +24,8 @@ export type PrestamoCalculo = {
 
 const redondear = (n: number) => Math.round(n * 100) / 100;
 
+const redondearHaciaAbajo = (n: number) => Math.floor(n * 100) / 100;
+
 function sumarPeriodos(fecha: Date, frecuencia: Frecuencia, periodos: number): Date {
   const d = new Date(fecha.getFullYear(), fecha.getMonth(), fecha.getDate());
   switch (frecuencia) {
@@ -55,7 +57,7 @@ export function calcularPrestamo(
 ): PrestamoCalculo {
   const interes = redondear((monto * interesPorcentaje) / 100);
   const montoTotal = redondear(monto + interes);
-  const cuotaBase = redondear(montoTotal / numeroCuotas);
+  const cuotaBase = redondearHaciaAbajo(montoTotal / numeroCuotas);
   const ultimaCuota = redondear(montoTotal - cuotaBase * (numeroCuotas - 1));
 
   const cuotas: CuotaPreview[] = Array.from({ length: numeroCuotas }, (_, i) => ({

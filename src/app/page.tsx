@@ -135,7 +135,11 @@ export default function Home() {
 
     setEnviando(false);
     if (error) {
-      setErrorGlobal(`No se pudo registrar el cliente: ${error.message}`);
+      setErrorGlobal(
+        error.code === "23505"
+          ? "Ya existe un cliente registrado con ese DNI."
+          : `No se pudo registrar el cliente: ${error.message}`,
+      );
       return;
     }
     setClientes((prev) => [data as Cliente, ...prev]);
