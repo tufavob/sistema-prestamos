@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { aYMD, formatearMoneda, FRECUENCIAS, hoyLocal, type Frecuencia } from "@/lib/prestamos";
-import { crearLinkWhatsApp, mensajeRecordatorio } from "@/lib/whatsapp";
 import { registrarCobro } from "@/lib/acciones";
 
 const supabase = hasAuthConfig ? createClient() : null;
@@ -62,30 +61,6 @@ const formatearFechaDB = (s: string) => {
   });
 };
 
-const estadoCuota = (estado: string) => {
-  switch (estado) {
-    case "pagado":
-      return { label: "Pagada", cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" };
-    case "parcial":
-      return { label: "Abonada", cls: "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300" };
-    case "vencido":
-      return { label: "Vencida", cls: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300" };
-    default:
-      return { label: "Pendiente", cls: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300" };
-  }
-};
-
-const WhatsAppIcon = ({ className }: { className?: string }) => (
-  <svg
-    className={className}
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z" />
-  </svg>
-);
-
 export default function DetallePrestamo({
   params,
 }: {
@@ -125,7 +100,7 @@ export default function DetallePrestamo({
         .from("cuotas")
         .select("id, numero, monto, fecha_vencimiento, estado, saldo_pendiente")
         .eq("prestamo_id", id)
-        .order("numero", { ascending: true }),
+        .order("fecha_vencimiento", { ascending: true }),
     ]);
 
     if (prestamoRes.error || cuotasRes.error) {
@@ -371,95 +346,53 @@ export default function DetallePrestamo({
               </span>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-left text-sm">
+            <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
+              <table className="w-full text-left text-sm">
                 <thead className="border-b border-slate-200 bg-slate-100 font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-200">
                   <tr>
-                    <th className="p-3 text-center">N° Cuota</th>
-                    <th className="p-3 text-left">Fecha Vencimiento</th>
-                    <th className="p-3 text-left">Monto</th>
-                    <th className="p-3 text-left">Estado</th>
+                    <th className="w-20 p-3 text-center">N° Cuota</th>
+                    <th className="p-3">Fecha Vencimiento</th>
+                    <th className="p-3">Monto</th>
+                    <th className="p-3">Estado</th>
                     <th className="p-3 text-center">Acciones</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
                   {cuotas.map((cuota, index) => {
-                    const ec = estadoCuota(cuota.estado);
                     const pagada = cuota.estado.toLowerCase() === "pagado";
-                    const cliente = primero(prestamo.clientes);
                     return (
-                      <tr
-                        key={cuota.id || index}
-                        className="border-b border-slate-100 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-zinc-800/40"
-                      >
-                        <td className="p-3 text-center font-medium text-zinc-900 dark:text-zinc-50">
-                          {cuota.numero || index + 1}
+                      <tr key={cuota.id || index} className="hover:bg-slate-50 dark:hover:bg-zinc-800/40">
+                        <td className="p-3 text-center font-bold text-slate-900 dark:text-zinc-50">
+                          {index + 1}
                         </td>
-                        <td className="p-3 text-zinc-600 dark:text-zinc-300">
+                        <td className="p-3 text-slate-700 dark:text-zinc-300">
                           {formatearFechaDB(cuota.fecha_vencimiento)}
                         </td>
-                        <td className="p-3 font-semibold text-zinc-900 dark:text-zinc-50">
+                        <td className="p-3 font-semibold text-slate-900 dark:text-zinc-50">
                           S/ {Number(cuota.monto).toFixed(2)}
                         </td>
                         <td className="p-3">
                           {pagada ? (
-                            <span className="font-medium text-green-600 dark:text-green-400">
+                            <span className="rounded-full bg-green-100 px-2 py-1 text-xs font-semibold text-green-700 dark:bg-green-950 dark:text-green-300">
                               ✓ Pagado
                             </span>
                           ) : (
-                            <>
-                              <span
-                                className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${ec.cls}`}
-                              >
-                                {ec.label}
-                              </span>
-                              {cuota.estado === "parcial" && (
-                                <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                                  Saldo: {formatearMoneda(Number(cuota.saldo_pendiente))}
-                                </p>
-                              )}
-                            </>
+                            <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                              Pendiente
+                            </span>
                           )}
                         </td>
                         <td className="p-3 text-center">
-                          <div className="flex items-center justify-center gap-2">
-                            {!pagada && cliente?.telefono && (
-                              <a
-                                href={crearLinkWhatsApp(
-                                  cliente.telefono,
-                                  mensajeRecordatorio({
-                                    nombres: `${cliente.nombres} ${cliente.apellidos}`,
-                                    numeroCuota: cuota.numero,
-                                    monto: Number(cuota.monto),
-                                  }),
-                                )}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                aria-label="Enviar recordatorio por WhatsApp"
-                                title="Enviar recordatorio por WhatsApp"
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-300 text-emerald-600 transition hover:bg-emerald-50 dark:border-zinc-700 dark:text-emerald-400 dark:hover:bg-emerald-950"
-                              >
-                                <WhatsAppIcon className="h-4 w-4" />
-                              </a>
-                            )}
-                            {!pagada && (
-                              <button
-                                type="button"
-                                onClick={() => registrarPago(cuota)}
-                                disabled={enviandoCuota === cuota.id}
-                                className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-zinc-900 px-3 text-xs font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-                              >
-                                {enviandoCuota === cuota.id ? (
-                                  <>
-                                    <Spinner />
-                                    Procesando...
-                                  </>
-                                ) : (
-                                  "Registrar Pago"
-                                )}
-                              </button>
-                            )}
-                          </div>
+                          {!pagada && (
+                            <button
+                              type="button"
+                              onClick={() => registrarPago(cuota)}
+                              disabled={enviandoCuota === cuota.id}
+                              className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {enviandoCuota === cuota.id ? "Procesando..." : "Registrar Pago"}
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -471,30 +404,5 @@ export default function DetallePrestamo({
         </>
       ) : null}
     </main>
-  );
-}
-
-function Spinner() {
-  return (
-    <svg
-      className="h-4 w-4 animate-spin"
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-    >
-      <circle
-        className="opacity-25"
-        cx="12"
-        cy="12"
-        r="10"
-        stroke="currentColor"
-        strokeWidth="4"
-      />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-      />
-    </svg>
   );
 }
