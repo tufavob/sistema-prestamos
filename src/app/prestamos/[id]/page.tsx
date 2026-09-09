@@ -372,31 +372,34 @@ export default function DetallePrestamo({
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="border-b bg-slate-100 dark:border-slate-700 dark:bg-slate-800/70">
-                  <tr className="text-slate-700 dark:text-slate-200">
-                    <th className="p-3 text-left">N° Cuota</th>
-                    <th className="p-3 text-left">Fecha Vencimiento</th>
-                    <th className="p-3 text-left">Monto</th>
-                    <th className="p-3 text-left">Estado</th>
+              <table className="w-full border-collapse text-left text-sm">
+                <thead className="border-b border-slate-200 bg-slate-100 font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-200">
+                  <tr>
+                    <th className="p-3 text-center">N° Cuota</th>
+                    <th className="p-3">Fecha Vencimiento</th>
+                    <th className="p-3">Monto</th>
+                    <th className="p-3">Estado</th>
                     <th className="p-3 text-center">Acciones</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                  {cuotas.map((c) => {
-                    const ec = estadoCuota(c.estado);
-                    const pagada = c.estado.toLowerCase() === "pagado";
+                <tbody>
+                  {cuotas.map((cuota) => {
+                    const ec = estadoCuota(cuota.estado);
+                    const pagada = cuota.estado.toLowerCase() === "pagado";
                     const cliente = primero(prestamo.clientes);
                     return (
-                      <tr key={c.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
-                        <td className="p-3 font-medium text-zinc-900 dark:text-zinc-50">
-                          {c.numero}
+                      <tr
+                        key={cuota.id}
+                        className="border-b border-slate-100 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-zinc-800/40"
+                      >
+                        <td className="p-3 text-center font-medium text-zinc-900 dark:text-zinc-50">
+                          {cuota.numero}
                         </td>
                         <td className="p-3 text-zinc-600 dark:text-zinc-300">
-                          {formatearFechaDB(c.fecha_vencimiento)}
+                          {formatearFechaDB(cuota.fecha_vencimiento)}
                         </td>
-                        <td className="p-3 font-semibold text-zinc-900 dark:text-zinc-50">
-                          {formatearMoneda(Number(c.monto))}
+                        <td className="p-3 font-medium text-zinc-900 dark:text-zinc-50">
+                          {formatearMoneda(Number(cuota.monto))}
                         </td>
                         <td className="p-3">
                           <span
@@ -404,9 +407,9 @@ export default function DetallePrestamo({
                           >
                             {ec.label}
                           </span>
-                          {c.estado === "parcial" && (
+                          {cuota.estado === "parcial" && (
                             <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                              Saldo: {formatearMoneda(Number(c.saldo_pendiente))}
+                              Saldo: {formatearMoneda(Number(cuota.saldo_pendiente))}
                             </p>
                           )}
                         </td>
@@ -418,8 +421,8 @@ export default function DetallePrestamo({
                                   cliente.telefono,
                                   mensajeRecordatorio({
                                     nombres: `${cliente.nombres} ${cliente.apellidos}`,
-                                    numeroCuota: c.numero,
-                                    monto: Number(c.monto),
+                                    numeroCuota: cuota.numero,
+                                    monto: Number(cuota.monto),
                                   }),
                                 )}
                                 target="_blank"
@@ -438,11 +441,11 @@ export default function DetallePrestamo({
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => registrarPago(c)}
-                                disabled={enviandoCuota === c.id}
+                                onClick={() => registrarPago(cuota)}
+                                disabled={enviandoCuota === cuota.id}
                                 className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-zinc-900 px-3 text-xs font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
                               >
-                                {enviandoCuota === c.id ? (
+                                {enviandoCuota === cuota.id ? (
                                   <>
                                     <Spinner />
                                     Procesando...
