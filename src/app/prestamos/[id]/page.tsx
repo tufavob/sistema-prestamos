@@ -2,10 +2,8 @@
 
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { aYMD, formatearMoneda, FRECUENCIAS, hoyLocal, type Frecuencia } from "@/lib/prestamos";
-import { registrarCobro } from "@/lib/acciones";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -61,13 +59,33 @@ const formatearFechaDB = (s: string) => {
   });
 };
 
+const numeroWhatsApp = (t: string) => {
+  const d = t.replace(/\D+/g, "");
+  return d.startsWith("51") ? d : `51${d}`;
+};
+
+const traducirErrorPago = (rpcMsg: string): string => {
+  const msg = rpcMsg.toLowerCase();
+  if (msg.includes("cuota no encontrada"))
+    return "La cuota ya no existe o no tienes permiso para registrarla.";
+  if (msg.includes("no puede superar el saldo"))
+    return "El monto supera el saldo pendiente de la cuota.";
+  if (msg.includes("mayor a cero")) return "El monto debe ser mayor a cero.";
+  if (
+    msg.includes("row-level security") ||
+    msg.includes("permission denied") ||
+    msg.includes("jwt")
+  )
+    return "Tu sesión expiró o no tienes permisos. Vuelve a iniciar sesión.";
+  return rpcMsg;
+};
+
 export default function DetallePrestamo({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const router = useRouter();
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mensaje, setMensaje] = useState<string | null>(null);
@@ -85,6 +103,15 @@ export default function DetallePrestamo({
       ),
     [cuotas],
   );
+
+  const cliente = prestamo ? primero(prestamo.clientes) : null;
+  const cuotasPagadas = cuotas.filter(
+    (c) => c.estado.toLowerCase() === "pagado",
+  ).length;
+  const proximoVencimiento = cuotas
+    .filter((c) => c.estado.toLowerCase() !== "pagado")
+    .map((c) => c.fecha_vencimiento)
+    .sort()[0];
 
   const obtenerDatos = useCallback(async (): Promise<ResultadoDetalle | null> => {
     if (!supabase || !id) return null;
@@ -154,23 +181,29 @@ export default function DetallePrestamo({
     setCuotas(res.cuotas);
   };
 
-  const registrarPago = async (c: CuotaDetalle) => {
-    setMensaje(null);
-    setError(null);
-    setEnviandoCuota(c.id);
-    const res = await registrarCobro({
-      cuotaId: c.id,
-      monto: Number(c.saldo_pendiente),
-      fecha: aYMD(hoyLocal()),
-    });
-    setEnviandoCuota(null);
-    if (!res.ok) {
-      setError(`No se pudo registrar el pago: ${res.error}`);
+  const registrarPago = async (cuota: CuotaDetalle, index: number) => {
+    if (!supabase) {
+      setError("No se pudo registrar el pago: Supabase no configurado.");
       return;
     }
-    setMensaje(`Cuota ${c.numero} pagada correctamente.`);
-    router.refresh();
-    await refrescar();
+    setMensaje(null);
+    setError(null);
+    setEnviandoCuota(cuota.id);
+    try {
+      const { error } = await supabase.rpc("pagar_cuota", {
+        p_cuota_id: cuota.id,
+        p_monto: Number(cuota.saldo_pendiente),
+        p_fecha: aYMD(hoyLocal()),
+      });
+      if (error) {
+        setError(`No se pudo registrar el pago: ${traducirErrorPago(error.message)}`);
+        return;
+      }
+      await refrescar();
+      setMensaje(`Cuota ${index + 1} pagada correctamente.`);
+    } finally {
+      setEnviandoCuota(null);
+    }
   };
 
   if (!supabase) {
@@ -259,29 +292,51 @@ export default function DetallePrestamo({
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-5 py-4 dark:border-zinc-800 dark:bg-zinc-800/60">
               <div className="flex flex-wrap items-center gap-3">
                 <span className="flex h-11 w-11 items-center justify-center rounded-full bg-zinc-900 text-sm font-semibold text-white dark:bg-zinc-200 dark:text-zinc-900">
-                  {primero(prestamo.clientes)?.nombres.charAt(0) ?? "?"}
-                  {primero(prestamo.clientes)?.apellidos.charAt(0) ?? ""}
+                  {cliente?.nombres.charAt(0) ?? "?"}
+                  {cliente?.apellidos.charAt(0) ?? ""}
                 </span>
                 <div>
                   <p className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">
-                    {primero(prestamo.clientes)
-                      ? `${primero(prestamo.clientes)?.nombres} ${primero(prestamo.clientes)?.apellidos}`
-                      : "Cliente eliminado"}
+                    {cliente ? `${cliente.nombres} ${cliente.apellidos}` : "Cliente eliminado"}
                   </p>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                    DNI {primero(prestamo.clientes)?.dni ?? "—"}
+                    DNI {cliente?.dni ?? "—"}
                   </p>
                 </div>
               </div>
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                  saldoPendiente > 0
-                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                    : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                }`}
-              >
-                {saldoPendiente > 0 ? "Activo" : "Pagado"}
-              </span>
+              <div className="flex flex-wrap items-center gap-3">
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    saldoPendiente > 0
+                      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                      : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                  }`}
+                >
+                  {saldoPendiente > 0 ? "Activo" : "Pagado"}
+                </span>
+                {cliente?.telefono && (
+                  <a
+                    href={`https://wa.me/${numeroWhatsApp(cliente.telefono)}?text=${encodeURIComponent(
+                      `Hola ${cliente.nombres} ${cliente.apellidos}, este es el estado de su cuenta:\n` +
+                        `• Préstamo: S/ ${formatearMoneda(Number(prestamo.monto_total))}\n` +
+                        `• Saldo pendiente: S/ ${formatearMoneda(saldoPendiente)}\n` +
+                        `• Cuotas pagadas: ${cuotasPagadas}/${cuotas.length}\n` +
+                        `• Próximo vencimiento: ${
+                          proximoVencimiento ? formatearFechaDB(proximoVencimiento) : "—"
+                        }\n\n` +
+                        `Gracias por su confianza.`,
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white transition hover:bg-emerald-700"
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+                      <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 0 1-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0 0 12.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 0 0 5.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 0 0-3.48-8.413z" />
+                    </svg>
+                    Enviar Resumen por WhatsApp
+                  </a>
+                )}
+              </div>
             </div>
 
             <dl className="grid grid-cols-2 gap-x-4 gap-y-5 p-5 sm:grid-cols-3 lg:grid-cols-6">
@@ -382,10 +437,23 @@ export default function DetallePrestamo({
                           )}
                         </td>
                         <td className="p-3 text-center">
-                          {String(cuota.estado).toLowerCase() !== "pagado" && (
+                          {String(cuota.estado).toLowerCase() === "pagado" ? (
+                            cliente?.telefono && (
+                              <a
+                                href={`https://wa.me/${numeroWhatsApp(cliente.telefono)}?text=${encodeURIComponent(
+                                  `Hola ${cliente.nombres}, confirmamos el recibo de pago de la Cuota #${index + 1} por S/ ${Number(cuota.monto).toFixed(2)}. Saldo restante: S/ ${saldoPendiente.toFixed(2)}. ¡Gracias!`,
+                                )}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="ml-2 inline-flex items-center gap-1 rounded bg-green-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-green-700"
+                              >
+                                💬 Recibo WA
+                              </a>
+                            )
+                          ) : (
                             <button
                               type="button"
-                              onClick={() => registrarPago(cuota)}
+                              onClick={() => registrarPago(cuota, index)}
                               disabled={enviandoCuota === cuota.id}
                               className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                             >
