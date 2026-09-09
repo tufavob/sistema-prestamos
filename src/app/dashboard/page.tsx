@@ -144,7 +144,7 @@ export default function Dashboard() {
     });
 
     try {
-      const [metricasRes, moraRes, cuotasPagadasRes] = await Promise.all([
+      const [metricasRes, moraRes, cuotasPagadasRes, cuotasTotalesRes] = await Promise.all([
         supabase.rpc("metricas_dashboard"),
         supabase
           .from("cuotas")
@@ -157,6 +157,7 @@ export default function Dashboard() {
           .from("cuotas")
           .select("monto, monto_pagado, estado")
           .eq("estado", "pagado"),
+        supabase.from("cuotas").select("monto, estado"),
       ]);
 
       console.log("Metricas desde Supabase:", metricasRes.data);
@@ -187,6 +188,23 @@ export default function Dashboard() {
             return total + Number(cuota.monto_pagado || cuota.monto || 0);
           }
           return total;
+        }, 0);
+      }
+
+      let totalPorCobrar = 0;
+      const cuotas = (cuotasTotalesRes.data ?? []) as {
+        monto: number;
+        estado: string;
+      }[];
+      if (cuotasTotalesRes.error) {
+        console.error("Error cargando cuotas:", cuotasTotalesRes.error);
+        totalPorCobrar = met.totalPorCobrar;
+      } else {
+        totalPorCobrar = cuotas.reduce((sum, cuota) => {
+          if (String(cuota.estado).toLowerCase() !== "pagado") {
+            return sum + Number(cuota.monto || 0);
+          }
+          return sum;
         }, 0);
       }
 
@@ -227,7 +245,7 @@ export default function Dashboard() {
         hoy: met.hoyVal ?? hoy,
         totalPrestamos: met.prestamosActivos,
         capitalEnCalle: met.capitalCalle,
-        totalPorCobrar: met.totalPorCobrar,
+        totalPorCobrar,
         recaudoHoy: recaudoDelDia,
         gananciaProyectada: met.gananciaProyectada,
         gananciaRealCobrada: met.gananciaReal,
