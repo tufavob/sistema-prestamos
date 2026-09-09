@@ -134,15 +134,21 @@ export default function Cobros() {
 const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     if (!supabase) return null;
     const hoy = aYMD(hoyLocal());
+    const hoySVE = new Date().toLocaleDateString("sv-SE");
+
+    const seleccionCuotas =
+      "id, numero, monto, fecha_vencimiento, estado, saldo_pendiente, prestamos!inner(numero_cuotas, clientes!inner(nombres, apellidos, telefono, direccion, referencia))";
 
     const { data: cuotasData, error: cuotasError } = await supabase
       .from("cuotas")
-      .select(
-        "id, numero, monto, fecha_vencimiento, estado, saldo_pendiente, prestamos!inner(numero_cuotas, clientes!inner(nombres, apellidos, telefono, direccion, referencia))",
-      )
+      .select(seleccionCuotas)
       .eq("fecha_vencimiento", hoy)
       .in("estado", ["pendiente", "parcial", "vencido", "pagado"])
       .order("fecha_vencimiento", { ascending: true });
+
+    const { data: pagosData, error: pagosError } = await supabase
+      .from("pagos")
+      .select("monto, fecha_pago, created_at, cuota_id");
 
     if (cuotasError) {
       return {
@@ -153,20 +159,65 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
         hoy,
       };
     }
+    if (pagosError) {
+      return {
+        error: `No se pudo cargar el resumen del día: ${pagosError.message}. Revisa que la tabla "pagos" exista (migración 02).`,
+        cobros: [],
+        totalACobrar: 0,
+        totalRecaudado: 0,
+        hoy,
+      };
+    }
 
     const cuotas = normalizarCobros((cuotasData as unknown as RawCobro[]) ?? []);
+
+    // Recaudado hoy = pagos registrados HOY (fecha real del cobro).
+    const cuotasPagadasHoy = new Set<string>();
+    const recaudadoHoy = (
+      (pagosData as
+        | Array<{
+            monto: number;
+            fecha_pago: string;
+            created_at: string;
+            cuota_id: string;
+          }>
+        | null) ??
+      []
+    ).reduce((suma, pago) => {
+      const fechaPago = new Date(pago.created_at || pago.fecha_pago).toLocaleDateString(
+        "sv-SE",
+      );
+      if (fechaPago !== hoySVE) return suma;
+      cuotasPagadasHoy.add(pago.cuota_id);
+      return suma + Number(pago.monto || 0);
+    }, 0);
+
+    // Cuotas cobradas hoy con vencimiento distinto (pago adelantado o atrasado).
+    if (cuotasPagadasHoy.size > 0) {
+      const { data: pagadasHoyData, error: pagadasHoyError } = await supabase
+        .from("cuotas")
+        .select(seleccionCuotas)
+        .in("id", [...cuotasPagadasHoy]);
+
+      if (!pagadasHoyError) {
+        const idsActuales = new Set(cuotas.map((c) => c.id));
+        for (const c of normalizarCobros((pagadasHoyData as unknown as RawCobro[]) ?? [])) {
+          if (!idsActuales.has(c.id)) {
+            idsActuales.add(c.id);
+            cuotas.push(c);
+          }
+        }
+      }
+    }
+
     return {
       error: null,
       cobros: cuotas,
       totalACobrar: cuotas.reduce(
-        (s, c) =>
-          c.estado === "pendiente" ? s + Number(c.monto) : s,
+        (s, c) => (c.estado === "pendiente" ? s + Number(c.monto) : s),
         0,
       ),
-      totalRecaudado: cuotas.reduce(
-        (s, c) => (c.estado === "pagado" ? s + Number(c.monto) : s),
-        0,
-      ),
+      totalRecaudado: recaudadoHoy,
       hoy,
     };
   }, []);
@@ -518,6 +569,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
             const montoPagadoCuota = monto - saldo;
             const parcial = !pagado && c.estado === "parcial";
             const vencida = !pagado && c.fecha_vencimiento < fechaHoy;
+            const adelantada = pagado && c.fecha_vencimiento > fechaHoy;
             const pctCuota =
               monto > 0 ? Math.min(100, Math.round((montoPagadoCuota / monto) * 100)) : 0;
 
@@ -604,13 +656,21 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                       <span
                         className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
                           pagado
-                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                            ? adelantada
+                              ? "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                              : "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                             : vencida
                               ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
                               : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                         }`}
                       >
-                        {pagado ? "✓ Pagado" : vencida ? "Vencida" : "Hoy"}
+                        {pagado
+                          ? adelantada
+                            ? "Cobro Adelantado"
+                            : "✓ Pagado"
+                          : vencida
+                            ? "Vencida"
+                            : "Hoy"}
                       </span>
                     </div>
                   </div>
