@@ -93,6 +93,13 @@ export async function registrarCobro(input: {
   const estadoFinal = nuevoPagado >= montoCuota ? "pagado" : "parcial";
 
   // 2) Actualizar la cuota (pago total -> 'pagado'; abono parcial -> 'parcial').
+  const medioPago =
+    input.medioPago === "yape" ||
+    input.medioPago === "plin" ||
+    input.medioPago === "transferencia"
+      ? input.medioPago
+      : "efectivo";
+
   const actualizacion: Record<string, string | number> = {
     estado: estadoFinal,
     monto_pagado: nuevoPagado,
@@ -102,10 +109,20 @@ export async function registrarCobro(input: {
     actualizacion.fecha_pago = input.fecha;
   }
 
-  const { error: errorCuota } = await supabase
+  let { error: errorCuota } = await supabase
     .from("cuotas")
-    .update(actualizacion)
+    .update({ ...actualizacion, metodo_pago: medioPago })
     .eq("id", input.cuotaId);
+  if (
+    errorCuota &&
+    /column|does not exist|metodo_pago/i.test(errorCuota.message)
+  ) {
+    const reintento = await supabase
+      .from("cuotas")
+      .update(actualizacion)
+      .eq("id", input.cuotaId);
+    errorCuota = reintento.error;
+  }
 
   if (errorCuota) {
     return {
@@ -141,12 +158,6 @@ export async function registrarCobro(input: {
   }
 
   // 4) Registrar el ingreso en `pagos` (columna estándar fecha_pago).
-  const medioPago =
-    input.medioPago === "yape" ||
-    input.medioPago === "plin" ||
-    input.medioPago === "transferencia"
-      ? input.medioPago
-      : "efectivo";
   const esAbonoParcial = estadoFinal === "parcial";
 
   const { data: sesion } = await supabase.auth.getUser();

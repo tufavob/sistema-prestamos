@@ -12,10 +12,6 @@ import {
 import Modal from "@/components/Modal";
 import BadgeCalificacion from "@/components/BadgeCalificacion";
 import {
-  obtenerScoresClientes,
-  type CreditScore,
-} from "@/lib/credito";
-import {
   obtenerResumenCliente,
   type ResumenCliente,
 } from "@/lib/clientes";
@@ -45,8 +41,6 @@ const getPublicImageUrl = (pathOrUrl: string | null | undefined): string | null 
 type DatosClientes = {
   error: string | null;
   lista: ClienteConFotos[];
-  mapa: Map<string, CreditScore>;
-  conPrestamos: Set<string>;
 };
 
 async function cargarDatosClientes(client: SupabaseClient): Promise<DatosClientes> {
@@ -56,37 +50,10 @@ async function cargarDatosClientes(client: SupabaseClient): Promise<DatosCliente
     .order("created_at", { ascending: false });
 
   if (error) {
-    return {
-      error: error.message,
-      lista: [],
-      mapa: new Map(),
-      conPrestamos: new Set(),
-    };
+    return { error: error.message, lista: [] };
   }
 
-  const lista = (data as ClienteConFotos[]) ?? [];
-  if (lista.length === 0) {
-    return { error: null, lista, mapa: new Map(), conPrestamos: new Set() };
-  }
-
-  const mapa = await obtenerScoresClientes(
-    client,
-    lista.map((c) => c.id),
-  );
-  const { data: prestamosData } = await client
-    .from("prestamos")
-    .select("cliente_id")
-    .in(
-      "cliente_id",
-      lista.map((c) => c.id),
-    );
-  const conPrestamos = new Set(
-    ((prestamosData as { cliente_id: string }[] | null) ?? []).map(
-      (p) => p.cliente_id,
-    ),
-  );
-
-  return { error: null, lista, mapa, conPrestamos };
+  return { error: null, lista: (data as ClienteConFotos[]) ?? [] };
 }
 
 type FormState = {
@@ -182,8 +149,6 @@ export default function Home() {
   const [guardandoEdicion, setGuardandoEdicion] = useState(false);
   const [errorEdicion, setErrorEdicion] = useState<string | null>(null);
 
-  const [scores, setScores] = useState<Map<string, CreditScore>>(new Map());
-  const [conPrestamos, setConPrestamos] = useState<Set<string>>(new Set());
   const [expedienteAbierto, setExpedienteAbierto] = useState<string | null>(null);
   const [resumenes, setResumenes] = useState<Record<string, ResumenCliente>>({});
   const [cargandoExpediente, setCargandoExpediente] = useState<string | null>(null);
@@ -227,8 +192,6 @@ export default function Home() {
       return;
     }
     setClientes(r.lista);
-    setScores(r.mapa);
-    setConPrestamos(r.conPrestamos);
   };
 
   useEffect(() => {
@@ -243,8 +206,6 @@ export default function Home() {
           );
         } else {
           setClientes(r.lista);
-          setScores(r.mapa);
-          setConPrestamos(r.conPrestamos);
         }
       }
       if (activo) setCargando(false);
@@ -252,6 +213,19 @@ export default function Home() {
     cargar();
     return () => {
       activo = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const revalidar = () => {
+      if (document.visibilityState !== "visible") return;
+      void fetchClientes();
+    };
+    window.addEventListener("focus", revalidar);
+    document.addEventListener("visibilitychange", revalidar);
+    return () => {
+      window.removeEventListener("focus", revalidar);
+      document.removeEventListener("visibilitychange", revalidar);
     };
   }, []);
 
@@ -596,19 +570,8 @@ export default function Home() {
   };
 
   const renderCalificacion = (c: ClienteConFotos) => {
-    const cal = String(c.calificacion ?? "").toLowerCase();
-    const sinPrestamos = !conPrestamos.has(c.id);
-    if (sinPrestamos || cal === "nuevo" || cal === "sin_historial") {
-      return (
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-700 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-200 shadow-sm">
-          <span className="h-1.5 w-1.5 rounded-full bg-white/60" />
-          {cal === "sin_historial" ? "Sin Historial" : "Nuevo"}
-        </span>
-      );
-    }
-    const score = scores.get(c.id);
-    if (!score) return null;
-    return <BadgeCalificacion calificacion={score.calificacion} score={score} />;
+    const cal = String(c.calificacion ?? "").toLowerCase().trim();
+    return <BadgeCalificacion calificacion={cal || "nuevo"} />;
   };
 
   return (
@@ -1115,11 +1078,7 @@ export default function Home() {
                         {c.nombres} {c.apellidos}
                       </td>
                       <td className="p-3">
-                        {renderCalificacion(c) ?? (
-                          <span className="text-xs text-slate-400 dark:text-slate-400">
-                            —
-                          </span>
-                        )}
+                        {renderCalificacion(c)}
                       </td>
                       <td className="p-3">
                         {c.dni_foto_url ||

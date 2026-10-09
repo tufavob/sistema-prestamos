@@ -4,17 +4,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { formatearMoneda, FRECUENCIAS, type Frecuencia } from "@/lib/prestamos";
-import {
-  ETIQUETAS_CALIFICACION,
-  obtenerScoresClientes,
-  type Calificacion,
-} from "@/lib/credito";
+import BadgeCalificacion from "@/components/BadgeCalificacion";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
 type TipoFiltro = "activos" | "finalizados" | "todos";
 
-type ClientePrestamo = { id: string; nombres: string; apellidos: string };
+type ClientePrestamo = {
+  id: string;
+  nombres: string;
+  apellidos: string;
+  calificacion?: string | null;
+};
 
 type CuotaPrestamo = {
   estado: string | null;
@@ -34,7 +35,6 @@ type Prestamo = {
   fecha_inicio: string;
   clientes: ClientePrestamo | ClientePrestamo[] | null;
   cuotas?: CuotaPrestamo[] | null;
-  calificacion?: Calificacion;
 };
 
 type ResultadoPrestamos = {
@@ -80,13 +80,6 @@ const computarSaldo = (p: Prestamo): { saldo: number } => {
   return { saldo: Math.max(0, saldo) };
 };
 
-const CLASES_CALIFICACION: Record<Calificacion, string> = {
-  excelente: "bg-emerald-500/10 border border-emerald-500/30 text-emerald-400",
-  bueno: "bg-sky-500/10 border border-sky-500/30 text-sky-400",
-  regular: "bg-amber-500/10 border border-amber-500/30 text-amber-400",
-  malo: "bg-red-500/10 border border-red-500/30 text-red-400",
-};
-
 export default function Prestamos() {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -113,28 +106,18 @@ export default function Prestamos() {
     const { data, error } = await supabase
       .from("prestamos")
       .select(
-        "*, clientes(*), cuotas(estado, monto, saldo_pendiente)",
+        "*, clientes(calificacion, nombres, apellidos), cuotas(estado, monto, saldo_pendiente)",
       )
       .order("created_at", { ascending: false });
 
     const crudos = (data ?? []) as unknown as Prestamo[];
-    const clienteIds = [
-      ...new Set(
-        crudos
-          .map((p) => primero(p.clientes)?.id)
-          .filter((x): x is string => Boolean(x)),
-      ),
-    ];
-    const scores = await obtenerScoresClientes(supabase, clienteIds);
 
     const prestamos = crudos.map((p) => {
       const { saldo } = computarSaldo(p);
-      const clienteId = primero(p.clientes)?.id;
       return {
         ...p,
         saldo_pendiente: saldo,
         estado: saldo <= 0 ? "finalizado" : p.estado,
-        calificacion: clienteId ? scores.get(clienteId)?.calificacion : undefined,
         cuotas: undefined,
       };
     });
@@ -277,6 +260,9 @@ className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-grad
                     Monto prestado
                   </th>
                   <th className="border-b border-slate-800 px-5 py-3 text-right font-semibold">
+                    Total a devolver
+                  </th>
+                  <th className="border-b border-slate-800 px-5 py-3 text-right font-semibold">
                     Saldo Pendiente
                   </th>
                   <th className="border-b border-slate-800 px-5 py-3 font-semibold">Frecuencia</th>
@@ -299,14 +285,8 @@ className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-grad
                         </p>
                       </td>
                       <td className="px-5 py-3.5">
-                        {p.calificacion ? (
-                          <span
-                            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold ${
-                              CLASES_CALIFICACION[p.calificacion]
-                            }`}
-                          >
-                            {ETIQUETAS_CALIFICACION[p.calificacion]}
-                          </span>
+                        {cliente ? (
+                          <BadgeCalificacion calificacion={cliente.calificacion} />
                         ) : (
                           <span className="text-slate-500">—</span>
                         )}
@@ -314,12 +294,13 @@ className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-grad
                        <td className="px-5 py-3.5 text-right font-bold text-slate-100">
                          {formatearMoneda(Number(p.monto_prestado || 0))}
                        </td>
+                      <td className="px-5 py-3.5 text-right font-semibold text-sky-300">
+                        {formatearMoneda(Number(p.monto_total || 0))}
+                      </td>
                       <td className="px-5 py-3.5 text-right">
                         <span
                           className={`font-bold ${
-                            finalizado
-                              ? "text-emerald-400"
-                              : "text-slate-300"
+                            finalizado ? "text-emerald-400" : "text-slate-300"
                           }`}
                         >
                           {formatearMoneda(Number(p.saldo_pendiente))}

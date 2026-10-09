@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { aYMD, formatearMoneda, hoyLocal } from "@/lib/prestamos";
+import { MEDIOS_DE_PAGO } from "@/lib/credito";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -25,18 +26,22 @@ type RawCuota = {
   id: string;
   prestamo_id?: string | null;
   monto?: number | null;
+  monto_pagado?: number | null;
   saldo_pendiente?: number | null;
   estado?: string | null;
   fecha_vencimiento?: string | null;
   fecha_pago?: string | null;
+  metodo_pago?: string | null;
   updated_at?: string | null;
 };
 
 type RawPago = {
   id: string;
   cuota_id?: string | null;
+  prestamo_id?: string | null;
   monto?: number | null;
   fecha_pago?: string | null;
+  medio_pago?: string | null;
 };
 
 type RawCliente = {
@@ -166,20 +171,10 @@ export default function ReportesPage() {
     const prestamoPorId = new Map<string, RawPrestamo>();
     for (const p of prestamos) prestamoPorId.set(p.id, p);
 
-    const pagoPorCuota = new Map<string, string>();
-    for (const pg of pagos) {
-      if (!pg.cuota_id) continue;
-      const f = ymd(pg.fecha_pago);
-      const prev = pagoPorCuota.get(pg.cuota_id);
-      if (f && (!prev || f > prev)) pagoPorCuota.set(pg.cuota_id, f);
-    }
-
     const esPagada = (c: RawCuota) => {
       const e = String(c.estado ?? "").toLowerCase();
-      return e === "pagado" || e === "liquidado";
+      return e === "pagado" || e === "pagada" || e === "liquidado";
     };
-    const fechaPagoCuota = (c: RawCuota) =>
-      ymd(c.fecha_pago) || pagoPorCuota.get(c.id) || ymd(c.updated_at);
 
     const cuotasPorPrestamo = new Map<string, RawCuota[]>();
     for (const c of cuotas) {
@@ -192,24 +187,55 @@ export default function ReportesPage() {
     const prestamosPeriodo = prestamos.filter((p) => enRango(p.fecha_inicio ?? p.created_at));
     const totalPrestado = r2(prestamosPeriodo.reduce((s, p) => s + montoPrestadoDe(p), 0));
 
+    const cuotaPorId = new Map<string, RawCuota>();
+    for (const c of cuotas) cuotaPorId.set(c.id, c);
+
+    // Proporción de ganancia (interés) del préstamo sobre el monto total devuelto.
+    const proporcionGanancia = (p?: RawPrestamo) => {
+      if (!p) return 0;
+      const monto = montoPrestadoDe(p);
+      const total = Number(p.monto_total ?? p.total_devolver ?? 0);
+      if (monto > 0 && total > monto) return (total - monto) / total;
+      const tasa = tasaDe(p);
+      return tasa > 0 ? tasa / (100 + tasa) : 0;
+    };
+
+    // Resolver el préstamo asociado a un pago (por cuota o por prestamo_id).
+    const prestamoDePago = (pg: RawPago) => {
+      const cuota = pg.cuota_id ? cuotaPorId.get(pg.cuota_id) : undefined;
+      return prestamoPorId.get(String(cuota?.prestamo_id ?? pg.prestamo_id ?? ""));
+    };
+
+    // Cobros reales del periodo: se leen de la tabla `pagos` (fuente de verdad).
     let capitalRecuperado = 0;
     let gananciaCobrada = 0;
     const porFecha = new Map<string, { cobros: number; capital: number; ganancia: number }>();
-    for (const c of cuotas) {
-      if (!esPagada(c) || !enRango(fechaPagoCuota(c))) continue;
-      const p = c.prestamo_id ? prestamoPorId.get(c.prestamo_id) : undefined;
-      const factor = 1 / (1 + tasaDe(p) / 100);
-      const monto = Number(c.monto ?? 0);
-      const capital = r2(monto * factor);
-      const ganancia = r2(monto - capital);
+    const porMedio = new Map<string, number>();
+    for (const pg of pagos) {
+      const f = ymd(pg.fecha_pago);
+      if (!enRango(f)) continue;
+      const cuota = pg.cuota_id ? cuotaPorId.get(pg.cuota_id) : undefined;
+      const prestamo = prestamoPorId.get(
+        String(cuota?.prestamo_id ?? pg.prestamo_id ?? ""),
+      );
+      const monto = Number(pg.monto ?? 0);
+      const prop = proporcionGanancia(prestamo);
+      const ganancia = r2(monto * prop);
+      const capital = r2(monto - ganancia);
       capitalRecuperado += capital;
       gananciaCobrada += ganancia;
-      const f = fechaPagoCuota(c);
+
       const acc = porFecha.get(f) ?? { cobros: 0, capital: 0, ganancia: 0 };
       acc.cobros += 1;
-      acc.capital += capital;
-      acc.ganancia += ganancia;
+      acc.capital = r2(acc.capital + capital);
+      acc.ganancia = r2(acc.ganancia + ganancia);
       porFecha.set(f, acc);
+
+      // Método de pago: se prioriza `cuotas.metodo_pago` (con respaldo en pagos).
+      const medio =
+        (String(cuota?.metodo_pago ?? pg.medio_pago ?? "efectivo").toLowerCase().trim()) ||
+        "efectivo";
+      porMedio.set(medio, r2((porMedio.get(medio) ?? 0) + monto));
     }
     capitalRecuperado = r2(capitalRecuperado);
     gananciaCobrada = r2(gananciaCobrada);
@@ -219,9 +245,18 @@ export default function ReportesPage() {
       .map(([f, v]) => ({
         fecha: formatFechaCorta(f),
         cobros: v.cobros,
-        capital: r2(v.capital),
-        ganancia: r2(v.ganancia),
+        capital: v.capital,
+        ganancia: v.ganancia,
       }));
+
+    const ingresosPorMedio = MEDIOS_DE_PAGO.map((m) => ({
+      value: m.value,
+      label: m.label,
+      total: r2(porMedio.get(m.value) ?? 0),
+    }));
+    const totalIngresosPeriodo = r2(
+      ingresosPorMedio.reduce((s, m) => s + m.total, 0),
+    );
 
     const today = aYMD(hoyLocal());
     let carteraVigente = 0;
@@ -254,21 +289,11 @@ export default function ReportesPage() {
     for (const c of clientes) clientesPorId.set(c.id, c);
 
     const filas = new Map<string, FilaCliente>();
-    for (const p of prestamosPeriodo) {
-      const key = p.cliente_id ?? "sin-cliente";
-      const cuotasP = cuotasPorPrestamo.get(p.id) ?? [];
-      const pagado = r2(
-        cuotasP.filter(esPagada).reduce((s, c) => s + Number(c.monto ?? 0), 0),
-      );
-      const pendiente = r2(
-        cuotasP.filter((c) => !esPagada(c)).reduce((s, c) => s + Number(c.saldo_pendiente ?? 0), 0),
-      );
-      const capital = montoPrestadoDe(p);
-      const cliente = clientesPorId.get(key);
-
-      const previa =
-        filas.get(key) ??
-        ({
+    const asegurarFila = (clienteId: string): FilaCliente => {
+      let fila = filas.get(clienteId);
+      if (!fila) {
+        const cliente = clientesPorId.get(clienteId);
+        fila = {
           cliente: cliente ? `${cliente.nombres} ${cliente.apellidos}` : "Cliente eliminado",
           dni: cliente?.dni ?? "",
           prestamos: 0,
@@ -277,15 +302,43 @@ export default function ReportesPage() {
           ganancia: 0,
           pendiente: 0,
           estado: "Liquidado",
-        } satisfies FilaCliente);
+        };
+        filas.set(clienteId, fila);
+      }
+      return fila;
+    };
 
-      previa.prestamos += 1;
-      previa.prestado = r2(previa.prestado + capital);
-      previa.pagado = r2(previa.pagado + pagado);
-      previa.ganancia = r2(previa.ganancia + Math.max(0, pagado - capital));
-      previa.pendiente = r2(previa.pendiente + pendiente);
-      previa.estado = previa.pendiente > 0 ? "Activo" : "Liquidado";
-      filas.set(key, previa);
+    // Desembolsos del periodo.
+    for (const p of prestamosPeriodo) {
+      const fila = asegurarFila(p.cliente_id ?? "sin-cliente");
+      fila.prestamos += 1;
+      fila.prestado = r2(fila.prestado + montoPrestadoDe(p));
+    }
+
+    // Cobros del periodo: "Total pagado" y "Ganancia generada" (interés real).
+    for (const pg of pagos) {
+      if (!enRango(ymd(pg.fecha_pago))) continue;
+      const prestamo = prestamoDePago(pg);
+      const fila = asegurarFila(prestamo?.cliente_id ?? "sin-cliente");
+      const monto = Number(pg.monto ?? 0);
+      const ganancia = r2(monto * proporcionGanancia(prestamo));
+      fila.pagado = r2(fila.pagado + monto);
+      fila.ganancia = r2(fila.ganancia + ganancia);
+    }
+
+    // Pendiente y estado por cliente (sobre todas sus cuotas sin pagar).
+    for (const p of prestamos) {
+      const fila = filas.get(p.cliente_id ?? "sin-cliente");
+      if (!fila) continue;
+      const pendiente = r2(
+        (cuotasPorPrestamo.get(p.id) ?? [])
+          .filter((c) => !esPagada(c))
+          .reduce((s, c) => s + Number(c.saldo_pendiente ?? 0), 0),
+      );
+      fila.pendiente = r2(fila.pendiente + pendiente);
+    }
+    for (const fila of filas.values()) {
+      fila.estado = fila.pendiente > 0 ? "Activo" : "Liquidado";
     }
 
     return {
@@ -300,11 +353,14 @@ export default function ReportesPage() {
         carteraRiesgo: r2(carteraRiesgo),
       },
       diarios,
+      ingresosPorMedio,
+      totalIngresosPeriodo,
       filasClientes: [...filas.values()],
     };
   }, [prestamos, cuotas, pagos, clientes, fechaDesde, fechaHasta]);
 
-  const { resumen, diarios, filasClientes } = calculado;
+  const { resumen, diarios, ingresosPorMedio, totalIngresosPeriodo, filasClientes } =
+    calculado;
 
   const clientesFiltrados = filasClientes.filter((c) => {
     const q = busquedaCliente.trim().toLowerCase();
@@ -474,6 +530,35 @@ export default function ReportesPage() {
               </tfoot>
             )}
           </table>
+        </div>
+      </div>
+
+      {/* Ingresos por Método de Pago */}
+      <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 shadow-xl">
+        <div className="border-b border-slate-800 bg-slate-950/50 p-5">
+          <h2 className="text-lg font-semibold text-slate-100">Ingresos por Método de Pago</h2>
+          <p className="mt-1 text-xs text-slate-400">
+            Total recaudado en el periodo según el medio de pago registrado en cada cobro
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-4 p-5 sm:grid-cols-4">
+          {ingresosPorMedio.map((m) => (
+            <div
+              key={m.value}
+              className="rounded-xl border border-slate-800 bg-slate-950/60 p-4"
+            >
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                {m.label}
+              </p>
+              <p className="mt-1 text-lg font-bold text-emerald-400">
+                {formatearMoneda(m.total)}
+              </p>
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center justify-between border-t border-slate-800 bg-slate-950/70 px-5 py-3 text-sm font-bold text-slate-100">
+          <span>Total del periodo</span>
+          <span className="text-emerald-400">{formatearMoneda(totalIngresosPeriodo)}</span>
         </div>
       </div>
 

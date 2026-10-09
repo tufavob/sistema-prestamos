@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export type Calificacion = "excelente" | "bueno" | "regular" | "malo";
+export type Calificacion =
+  | "nuevo"
+  | "excelente"
+  | "bueno"
+  | "regular"
+  | "deficiente"
+  | "malo";
 
 export type CreditScore = {
   calificacion: Calificacion;
@@ -12,18 +18,30 @@ export type CreditScore = {
 };
 
 export const ETIQUETAS_CALIFICACION: Record<Calificacion, string> = {
-  excelente: "Excelente",
-  bueno: "Bueno",
-  regular: "Regular",
-  malo: "Malo",
+  nuevo: "NUEVO",
+  excelente: "EXCELENTE",
+  bueno: "BUENO",
+  regular: "REGULAR",
+  deficiente: "DEFICIENTE",
+  malo: "DEFICIENTE",
 };
 
 export const BADGE_CLASES_CALIFICACION: Record<Calificacion, string> = {
+  nuevo: "border border-slate-500/40 bg-slate-600/30 text-slate-200",
   excelente: "bg-emerald-600 text-white",
-  bueno: "bg-sky-600 text-white",
-  regular: "bg-amber-500 text-white",
+  bueno: "bg-lime-500 text-white",
+  regular: "bg-orange-500 text-white",
+  deficiente: "bg-red-600 text-white",
   malo: "bg-red-600 text-white",
 };
+
+export function normalizarCalificacion(
+  valor: string | null | undefined,
+): Calificacion {
+  const v = (valor ?? "").toLowerCase().trim();
+  if (v in ETIQUETAS_CALIFICACION) return v as Calificacion;
+  return "nuevo";
+}
 
 export const MEDIOS_DE_PAGO = [
   { value: "efectivo", label: "Efectivo" },
@@ -43,15 +61,15 @@ const redondear = (n: number): number => Math.round(n * 100) / 100;
  * Calificación dinámica según la puntualidad promedio del historial:
  * - Excelente (verde): 0 días de retraso promedio (pagos a tiempo o adelantados).
  * - Bueno (azul): promedio de 1 día de retraso (>= 1 y < 2).
- * - Regular (amarillo): promedio de 2 a 4 días de retraso.
- * - Malo (rojo): promedio de 5+ días de retraso o deuda morosa (cuotas
+ * - Regular (naranja): promedio de 2 a 4 días de retraso.
+ * - Deficiente (rojo): promedio de 5+ días de retraso o deuda morosa (cuotas
  *   vencidas sin cobrar).
  */
 export function calcularCalificacion(
   diasRetrasoPromedio: number,
   morosidad: boolean,
 ): Calificacion {
-  if (morosidad || diasRetrasoPromedio >= 5) return "malo";
+  if (morosidad || diasRetrasoPromedio >= 5) return "deficiente";
   if (diasRetrasoPromedio >= 2) return "regular";
   if (diasRetrasoPromedio >= 1) return "bueno";
   return "excelente";
