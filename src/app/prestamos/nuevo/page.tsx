@@ -14,6 +14,7 @@ import {
   formatearFecha,
   formatearMoneda,
   FRECUENCIAS,
+  TASAS_INTERES,
   hoyLocal,
   type Frecuencia,
 } from "@/lib/prestamos";
@@ -21,10 +22,10 @@ import {
 const supabase = hasAuthConfig ? createClient() : null;
 
 const inputCls =
-  "w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:placeholder:text-zinc-500 dark:focus:border-zinc-200";
+  "w-full rounded-lg border border-slate-800 bg-slate-950/70 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20";
 
 const labelCls =
-  "mb-1.5 block text-sm font-medium text-zinc-700 dark:text-zinc-300";
+  "mb-1.5 block text-sm font-medium text-slate-300";
 
 type FormErrors = {
   cliente?: string;
@@ -47,7 +48,7 @@ export default function NuevoPrestamo() {
   const comboboxRef = useRef<HTMLDivElement>(null);
 
   const [monto, setMonto] = useState("");
-  const [interes, setInteres] = useState("");
+  const [interes, setInteres] = useState("20");
   const [frecuencia, setFrecuencia] = useState<Frecuencia>("mensual");
   const [numeroCuotas, setNumeroCuotas] = useState("");
   const [fechaInicio, setFechaInicio] = useState(aYMD(hoyLocal()));
@@ -184,7 +185,7 @@ export default function NuevoPrestamo() {
     if (saldoPendiente > 0 && !liquidarSaldo)
       e.liquidar = `El cliente tiene un saldo pendiente de ${formatearMoneda(
         saldoPendiente,
-      )}. Marca la casilla para liquidarlo con este nuevo préstamo.`;
+      )}. Activa la casilla para amortizarlo y descontarlo del nuevo capital.`;
     return e;
   };
 
@@ -208,7 +209,7 @@ export default function NuevoPrestamo() {
     const params = {
       p_cliente_id: clienteSeleccionado.id,
       p_monto: aDosDecimales(Number(monto)),
-      p_interes_porcentaje: aDosDecimales(Number(interes)),
+      p_porcentaje_interes: aDosDecimales(Number(interes)),
       p_frecuencia: frecuencia,
       p_numero_cuotas: Number(numeroCuotas),
       p_fecha_inicio: fechaInicio,
@@ -224,7 +225,7 @@ export default function NuevoPrestamo() {
     if (error) {
       if (error.message.toLowerCase().includes("vigente")) {
         setErrorGlobal(
-          `El cliente tiene un préstamo vigente con cuotas pendientes. Marca la casilla "Liquidar saldo pendiente" para renovarlo.`,
+          `El cliente tiene un préstamo vigente con cuotas pendientes. Marca la casilla "Amortizar saldo anterior" para renovarlo.`,
         );
       } else {
         setErrorGlobal(
@@ -240,7 +241,7 @@ export default function NuevoPrestamo() {
 
     setMensaje(
       liquidar
-        ? `Préstamo generado y saldo anterior liquidado para ${nombreCompleto(
+        ? `Préstamo generado y saldo anterior amortizado para ${nombreCompleto(
             clienteSeleccionado,
           )} (ID: ${String(data).slice(0, 8)}…).`
         : `Préstamo generado correctamente para ${nombreCompleto(clienteSeleccionado)} (ID: ${String(data).slice(0, 8)}…).`,
@@ -261,7 +262,7 @@ export default function NuevoPrestamo() {
         <div>
           <Link
             href="/"
-            className="mb-2 inline-flex items-center gap-1 text-sm text-zinc-500 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-50"
+            className="mb-2 inline-flex items-center gap-1 text-sm text-slate-400 transition hover:text-slate-100"
           >
             <svg
               className="h-3.5 w-3.5"
@@ -277,10 +278,10 @@ export default function NuevoPrestamo() {
             </svg>
             Volver a clientes
           </Link>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl dark:text-zinc-50">
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-100 sm:text-3xl">
             Nuevo préstamo
           </h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+          <p className="mt-1 text-sm text-slate-400 dark:text-slate-500">
             Genera el préstamo y su cronograma de cuotas automáticamente.
           </p>
         </div>
@@ -296,21 +297,21 @@ export default function NuevoPrestamo() {
       )}
 
       {errorGlobal && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
+        <div className="rounded-lg border border-red-800 bg-red-950/60 p-4 text-sm text-red-300">
           {errorGlobal}
         </div>
       )}
 
       {mensaje && (
-        <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
+        <div className="rounded-lg border border-emerald-800 bg-emerald-950/60 p-4 text-sm text-emerald-300">
           {mensaje}
         </div>
       )}
 
       <div className="grid items-start gap-6 lg:grid-cols-5">
         {/* Formulario */}
-        <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-6 lg:col-span-3 dark:border-zinc-800 dark:bg-zinc-900">
-          <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-sm sm:p-6 lg:col-span-3">
+          <h2 className="mb-4 text-lg font-semibold text-slate-100">
             Datos del préstamo
           </h2>
           <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
@@ -352,10 +353,10 @@ export default function NuevoPrestamo() {
                 {dropdownAbierto && (
                   <ul
                   id="lista-clientes"
-                  className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+                  className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/80 py-1 shadow-xl"
                 >
                     {clientesFiltrados.length === 0 ? (
-                      <li className="px-3.5 py-2.5 text-sm text-zinc-500 dark:text-zinc-400">
+                      <li className="px-3.5 py-2.5 text-sm text-slate-400 dark:text-slate-500">
                         {clientes.length === 0
                           ? "No hay clientes registrados. " +
                             (cargandoClientes ? "Cargando..." : "")
@@ -369,26 +370,26 @@ export default function NuevoPrestamo() {
                             disabled={verificando !== null}
                             onMouseDown={(e) => e.preventDefault()}
                             onClick={() => seleccionarCliente(c)}
-                            className={`flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-sm transition hover:bg-zinc-100 disabled:cursor-wait dark:hover:bg-zinc-800 ${
+                            className={`flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-sm transition hover:bg-slate-800/70 disabled:cursor-wait ${
                               clienteSeleccionado?.id === c.id
-                                ? "bg-zinc-100 dark:bg-zinc-800"
+                                ? "bg-slate-800/70"
                                 : ""
                             }`}
                           >
-                            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-900 text-xs font-semibold text-white dark:bg-zinc-200 dark:text-zinc-900">
+                            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-emerald-600 to-teal-500 text-xs font-semibold text-white">
                               {`${c.nombres.charAt(0)}${c.apellidos.charAt(0)}`.toUpperCase()}
                             </span>
                             <span className="min-w-0">
-                              <span className="block font-medium text-zinc-900 dark:text-zinc-50">
+                              <span className="block font-medium text-slate-100">
                                 {nombreCompleto(c)}
                               </span>
-                              <span className="block text-xs text-zinc-500 dark:text-zinc-400">
+                              <span className="block text-xs text-slate-400 dark:text-slate-500">
                                 DNI {c.dni}
                               </span>
                             </span>
                             {clienteSeleccionado?.id === c.id && (
                               <svg
-                                className="ml-auto h-4 w-4 shrink-0 text-zinc-900 dark:text-zinc-50"
+                                className="ml-auto h-4 w-4 shrink-0 text-slate-100"
                                 viewBox="0 0 24 24"
                                 fill="none"
                                 stroke="currentColor"
@@ -426,10 +427,11 @@ export default function NuevoPrestamo() {
                       setLiquidarSaldo(e.target.checked);
                       setErrors((prev) => ({ ...prev, liquidar: undefined }));
                     }}
-                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-300 accent-zinc-900 dark:accent-zinc-100"
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-700 accent-emerald-500"
                   />
                   <span className="text-sm text-amber-900 dark:text-amber-200">
-                    Liquidar saldo pendiente con este nuevo préstamo
+                    Amortizar saldo anterior: descontarlo del nuevo capital y cerrar el
+                    préstamo vigente
                   </span>
                 </label>
                 {errors.liquidar && (
@@ -482,6 +484,25 @@ export default function NuevoPrestamo() {
                   }}
                   aria-invalid={Boolean(errors.interes)}
                 />
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {TASAS_INTERES.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => {
+                        setInteres(String(t));
+                        setErrors((prev) => ({ ...prev, interes: undefined }));
+                      }}
+                      className={`inline-flex h-8 shrink-0 items-center justify-center rounded-md border px-3 text-xs font-semibold transition ${
+                        Number(interes) === t
+                          ? "border-emerald-500 bg-emerald-600 text-slate-950"
+                          : "border-slate-700 bg-slate-900/80 text-slate-300 hover:bg-slate-800/70"
+                      }`}
+                    >
+                      {t}%
+                    </button>
+                  ))}
+                </div>
                 {errors.interes && (
                   <p className="mt-1 text-xs text-red-600 dark:text-red-400">{errors.interes}</p>
                 )}
@@ -556,7 +577,7 @@ export default function NuevoPrestamo() {
             <button
               type="submit"
               disabled={enviando}
-              className="mt-1 inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-zinc-900 px-6 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+              className="mt-1 inline-flex h-11 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-500 px-6 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/50 transition hover:from-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {enviando ? (
                 <>
@@ -564,73 +585,73 @@ export default function NuevoPrestamo() {
                   Generando préstamo...
                 </>
               ) : liquidarSaldo && saldoPendiente > 0 ? (
-                "Liquidar y Generar Préstamo"
+                "Amortizar y Generar Préstamo"
               ) : (
                 "Generar Préstamo"
               )}
             </button>
-            <p className="text-xs text-zinc-400 dark:text-zinc-500">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
               Al generar se registrarán el préstamo y todas sus cuotas en Supabase.
             </p>
           </form>
         </section>
 
         {/* Calculadora */}
-        <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-6 lg:sticky lg:top-6 lg:col-span-2 dark:border-zinc-800 dark:bg-zinc-900">
-          <h2 className="mb-4 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+        <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-sm sm:p-6 lg:sticky lg:top-6 lg:col-span-2">
+          <h2 className="mb-4 text-lg font-semibold text-slate-100">
             Resumen del préstamo
           </h2>
 
           {!calculo ? (
-            <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+            <div className="rounded-xl border border-dashed border-slate-700 p-8 text-center text-sm text-slate-400">
               Completa el monto, interés y número de cuotas para ver el cálculo en
               tiempo real.
             </div>
           ) : (
             <>
               <dl className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/60">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                <div className="rounded-xl bg-slate-950/70 p-4">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">
                     Monto
                   </dt>
-                  <dd className="mt-1 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+                  <dd className="mt-1 text-lg font-semibold text-slate-100">
                     {formatearMoneda(calculo.monto)}
                   </dd>
                 </div>
-                <div className="rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/60">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                <div className="rounded-xl bg-slate-950/70 p-4">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">
                     Interés ({Number(interes)}%)
                   </dt>
-                  <dd className="mt-1 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+                  <dd className="mt-1 text-lg font-semibold text-slate-100">
                     {formatearMoneda(calculo.interes)}
                   </dd>
                 </div>
-                <div className="col-span-2 rounded-xl bg-zinc-900 p-4 text-white dark:bg-zinc-100 dark:text-zinc-900">
-                  <dt className="text-xs font-medium uppercase tracking-wide opacity-70">
+                <div className="col-span-2 rounded-xl border border-emerald-800/50 bg-emerald-950/60 p-4 text-emerald-200">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-emerald-400">
                     Total a devolver
                   </dt>
                   <dd className="mt-1 text-2xl font-bold">
                     {formatearMoneda(calculo.montoTotal)}
                   </dd>
                 </div>
-                <div className="rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/60">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                <div className="rounded-xl bg-slate-950/70 p-4">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">
                     Cuota ({FRECUENCIAS.find((f) => f.value === frecuencia)?.label.toLowerCase()})
                   </dt>
-                  <dd className="mt-1 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+                  <dd className="mt-1 text-lg font-semibold text-slate-100">
                     {formatearMoneda(calculo.cuotaBase)}
                   </dd>
                   {calculo.ultimaCuota !== calculo.cuotaBase && (
-                    <dd className="text-xs text-zinc-500 dark:text-zinc-400">
+                    <dd className="text-xs text-slate-400 dark:text-slate-500">
                       Última: {formatearMoneda(calculo.ultimaCuota)}
                     </dd>
                   )}
                 </div>
-                <div className="rounded-xl bg-zinc-50 p-4 dark:bg-zinc-800/60">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                <div className="rounded-xl bg-slate-950/70 p-4">
+                  <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">
                     Vence el
                   </dt>
-                  <dd className="mt-1 text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+                  <dd className="mt-1 text-lg font-semibold text-slate-100">
                     {formatearFecha(calculo.cuotas[calculo.cuotas.length - 1].fecha)}
                   </dd>
                 </div>
@@ -639,7 +660,7 @@ export default function NuevoPrestamo() {
               {liquidarSaldo && saldoPendiente > 0 && (
                 <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950">
                   <p className="text-xs font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
-                    Liquidación incluida
+                    Amortización del saldo anterior
                   </p>
                   <dl className="mt-2 space-y-1 text-sm">
                     <div className="flex items-center justify-between text-amber-900 dark:text-amber-200">
@@ -664,17 +685,17 @@ export default function NuevoPrestamo() {
                 </div>
               )}
 
-              <h3 className="mb-2 mt-6 text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+              <h3 className="mb-2 mt-6 text-sm font-semibold text-slate-100">
                 Cronograma de pagos
-                <span className="ml-2 rounded-full bg-zinc-200 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                <span className="ml-2 rounded-full bg-slate-800 px-2 py-0.5 text-xs font-medium text-slate-300">
                   {calculo.cuotas.length} cuotas
                 </span>
               </h3>
-              <div className="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-700">
+              <div className="overflow-hidden rounded-xl border border-slate-800">
                 <div className="max-h-72 overflow-y-auto">
                   <table className="w-full text-left text-sm">
-                    <thead className="sticky top-0 bg-zinc-50 dark:bg-zinc-800/60">
-                      <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+                    <thead className="sticky top-0 bg-slate-950/70">
+                      <tr className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-400">
                         <th className="px-3 py-2.5 font-semibold">#</th>
                         <th className="px-3 py-2.5 font-semibold">Fecha</th>
                         <th className="px-3 py-2.5 text-right font-semibold">Monto</th>
@@ -684,15 +705,15 @@ export default function NuevoPrestamo() {
                       {calculo.cuotas.map((c) => (
                         <tr
                           key={c.numero}
-                          className="border-b border-zinc-100 last:border-0 dark:border-zinc-800"
+                          className="border-b border-slate-800 last:border-0"
                         >
-                          <td className="px-3 py-2 text-zinc-500 dark:text-zinc-400">
+                          <td className="px-3 py-2 text-slate-400 dark:text-slate-500">
                             {c.numero}
                           </td>
-                          <td className="px-3 py-2 text-zinc-800 dark:text-zinc-200">
+                          <td className="px-3 py-2 text-slate-200">
                             {formatearFecha(c.fecha)}
                           </td>
-                          <td className="px-3 py-2 text-right font-medium text-zinc-900 dark:text-zinc-50">
+                          <td className="px-3 py-2 text-right font-medium text-slate-100">
                             {formatearMoneda(c.monto)}
                           </td>
                         </tr>

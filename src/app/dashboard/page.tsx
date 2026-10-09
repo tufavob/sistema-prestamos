@@ -4,11 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { formatearMoneda } from "@/lib/prestamos";
-import {
-  exportarPagosCSV,
-  SELECT_PAGOS_REPORTE,
-  type PagoExportable,
-} from "@/lib/exportar";
+import { exportarReporteFinancieroCSV } from "@/lib/exportar";
+import { ETIQUETAS_CALIFICACION, obtenerScoresClientes } from "@/lib/credito";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -24,18 +21,20 @@ type MoraCliente = {
 type ResultadoDashboard = {
   error: string | null;
   hoy: string;
-  totalPrestamos: number;
-  capitalEnCalle: number;
-  totalPorCobrar: number;
   recaudoHoy: number;
+  totalPorCobrar: number;
+  cuotasPorCobrar: number;
+  capitalEnCalle: number;
   gananciaProyectada: number;
-  gananciaRealCobrada: number;
+  prestamosActivos: number;
+  totalPrestadoHoy: number;
+  cajaNetaHoy: number;
   mora: MoraCliente[];
 };
 
 type RawCliente = { id: string; nombres: string; apellidos: string };
 type RawCuotaMora = {
-  numero: number;
+  numero_cuota?: number;
   saldo_pendiente: number;
   estado: string;
   fecha_vencimiento: string;
@@ -45,68 +44,58 @@ type RawCuotaMora = {
     | null;
 };
 
+type RawCuotaHoy = {
+  monto: number;
+  saldo_pendiente: number;
+  estado: string;
+  fecha_vencimiento: string;
+};
+
+// Formas genéricas de filas con `select('*')` (columnas opcionales para no
+// asumir nombres que pueden no existir en la BD).
+type RawPrestamo = {
+  id: string;
+  monto?: number | null;
+  monto_prestado?: number;
+  monto_interes?: number;
+  interes?: number;
+  monto_total?: number;
+  total_devolver?: number;
+  estado?: string | null;
+  saldo_pendiente?: number | null;
+  created_at?: string;
+};
+type RawPago = {
+  id: string;
+  monto: number;
+  fecha_pago: string;
+  cuota_id: string;
+};
+
+type RawClienteExport = {
+  id: string;
+  nombres: string;
+  apellidos: string;
+  dni: string | null;
+};
+
+type RawPrestamoExport = {
+  id: string;
+  cliente_id: string | null;
+  estado?: string | null;
+  monto?: number | null;
+  monto_prestado?: number | null;
+  monto_total?: number | null;
+};
+
+type RawCuotaExport = {
+  prestamo_id: string | null;
+  estado: string | null;
+  saldo_pendiente?: number | null;
+  monto?: number | null;
+};
+
 const ESTADOS_POR_COBRAR = ["pendiente", "parcial", "vencido"];
-
-const numero = (v: unknown, fallback = 0): number => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-};
-
-type MetricasLeidas = {
-  recaudoDia: number;
-  capitalCalle: number;
-  totalPorCobrar: number;
-  gananciaProyectada: number;
-  gananciaReal: number;
-  clientesMora: number;
-  montoMora: number;
-  prestamosActivos: number;
-  hoyVal: string | null;
-};
-
-const leerMetricas = (data: unknown): MetricasLeidas => {
-  const fila = Array.isArray(data) ? (data as unknown[])[0] : data;
-  const m = (fila ?? {}) as Record<string, unknown>;
-  const primeroDe = (...claves: string[]): unknown => {
-    for (const clave of claves) {
-      if (Object.prototype.hasOwnProperty.call(m, clave)) return m[clave];
-    }
-    return undefined;
-  };
-  return {
-    recaudoDia: numero(
-      primeroDe(
-        "recaudo_dia",
-        "recaudado_hoy",
-        "recaudoDia",
-        "recaudadoHoy",
-      ),
-    ),
-    capitalCalle: numero(
-      primeroDe("capital_en_calle", "capital_calle", "capitalEnCalle"),
-    ),
-    totalPorCobrar: numero(primeroDe("total_por_cobrar", "totalPorCobrar")),
-    gananciaProyectada: numero(
-      primeroDe("ganancia_proyectada", "gananciaProyectada"),
-      20,
-    ),
-    gananciaReal: numero(
-      primeroDe(
-        "ganancia_real_cobrada",
-        "ganancia_real",
-        "gananciaRealCobrada",
-        "gananciaReal",
-      ),
-    ),
-    clientesMora: numero(primeroDe("clientes_mora", "clientesMora")),
-    montoMora: numero(primeroDe("monto_mora", "montoMora")),
-    prestamosActivos: numero(primeroDe("prestamos_activos", "prestamosActivos")),
-    hoyVal:
-      primeroDe("hoy") !== undefined && primeroDe("hoy") !== null
-        ? String(primeroDe("hoy"))
-        : null,
-  };
-};
 
 const primero = <T,>(x: T | T[] | null | undefined): T | null =>
   Array.isArray(x) ? (x[0] ?? null) : (x ?? null);
@@ -119,7 +108,15 @@ const aDate = (s: string) => {
 const diasMora = (hoy: string, fecha: string) =>
   Math.max(1, Math.round((aDate(hoy).getTime() - aDate(fecha).getTime()) / 86400000));
 
-const iniciales = (n: string, a: string) => `${n.charAt(0)}${a.charAt(0)}`.toUpperCase() || "?";
+// Proporción de interés de cada préstamo: (monto_total - monto) / monto_total.
+// Se usa para desglosar capital vs. ganancia en saldos y cobros.
+  const proporcionGanancia = (p: RawPrestamo): number => {
+    const monto = Number(p.monto_prestado ?? p.monto ?? 0);
+    const totalDevolver = Number(p.monto_total ?? p.total_devolver ?? monto * 1.2);
+    return totalDevolver > 0
+      ? Math.max(0, (totalDevolver - monto) / totalDevolver)
+      : 0.1666;
+  };
 
 export default function Dashboard() {
   const [cargando, setCargando] = useState(true);
@@ -129,132 +126,175 @@ export default function Dashboard() {
 
   const obtenerDashboard = useCallback(async (): Promise<ResultadoDashboard | null> => {
     if (!supabase) return null;
-    const hoy = new Date().toLocaleDateString("sv-SE");
+    const hoy = new Date().toLocaleDateString("en-CA");
 
-    const fallback = (): ResultadoDashboard => ({
-      error: null,
-      hoy,
-      totalPrestamos: 0,
-      capitalEnCalle: 0,
-      totalPorCobrar: 0,
-      recaudoHoy: 0,
-      gananciaProyectada: 20,
-      gananciaRealCobrada: 0,
-      mora: [],
-    });
+    let totalPorCobrar = 0;
+    let cuotasPorCobrar = 0;
+    let recaudoHoy = 0;
+    let prestamosActivos = 0;
+    let totalPrestadoHoy = 0;
+    let capitalEnCalle = 0;
+    let gananciaProyectada = 0;
 
-    try {
-      const [metricasRes, moraRes, cuotasPagadasRes, cuotasTotalesRes] = await Promise.all([
-        supabase.rpc("metricas_dashboard"),
-        supabase
-          .from("cuotas")
-          .select(
-            "numero, saldo_pendiente, estado, fecha_vencimiento, prestamos!inner(clientes!inner(id, nombres, apellidos))",
-          )
-          .lt("fecha_vencimiento", hoy)
-          .in("estado", ESTADOS_POR_COBRAR),
-        supabase
-          .from("cuotas")
-          .select("monto, monto_pagado, estado")
-          .eq("estado", "pagado"),
-        supabase.from("cuotas").select("monto, estado"),
-      ]);
+    // 1) Pagos y préstamos con `select('*')` para evitar errores 400 por
+    //    nombres de columnas inexistentes. Se asocian en memoria por IDs.
+    const [pagosRes, prestamosResRaw] = await Promise.all([
+      supabase.from("pagos").select("*"),
+      supabase
+        .from("prestamos")
+        .select("*")
+        .eq("estado", "activo"),
+    ]);
 
-      console.log("Metricas desde Supabase:", metricasRes.data);
-
-      if (metricasRes.error) {
-        console.error("Error desde Supabase RPC:", metricasRes.error);
-        return fallback();
+    const prestamoPorId = new Map<string, RawPrestamo>();
+    if (prestamosResRaw.error) {
+      console.error("Dashboard (préstamos):", prestamosResRaw.error.message);
+    } else {
+      for (const p of (prestamosResRaw.data ?? []) as unknown as RawPrestamo[]) {
+        prestamoPorId.set(p.id, p);
       }
+    }
 
-      let metricasRaw: unknown = metricasRes.data;
-      if (typeof metricasRaw === "string") {
-        metricasRaw = JSON.parse(metricasRaw);
+    // Total prestado HOY (desembolsos de la fecha actual) para la caja neta.
+    for (const p of prestamoPorId.values()) {
+      const fechaCreacion = String(p.created_at ?? "").substring(0, 10);
+      if (fechaCreacion === hoy) {
+        totalPrestadoHoy += Number(p.monto_prestado ?? p.monto ?? 0);
       }
-      const met = leerMetricas(metricasRaw);
+    }
 
-      let recaudoDelDia = 0;
-      const cuotasPagadas = (cuotasPagadasRes.data ?? []) as {
-        monto: number;
-        monto_pagado: number | null;
-        estado: string;
-      }[];
-      if (cuotasPagadasRes.error) {
-        console.error("Error cargando cuotas pagadas:", cuotasPagadasRes.error);
-      } else {
-        recaudoDelDia = cuotasPagadas.reduce((total, cuota) => {
-          const estado = (cuota.estado || "").toString().toLowerCase();
-          if (estado === "pagado") {
-            return total + Number(cuota.monto_pagado || cuota.monto || 0);
-          }
-          return total;
-        }, 0);
-      }
-
-      let totalPorCobrar = 0;
-      const cuotas = (cuotasTotalesRes.data ?? []) as {
-        monto: number;
-        estado: string;
-      }[];
-      if (cuotasTotalesRes.error) {
-        console.error("Error cargando cuotas:", cuotasTotalesRes.error);
-        totalPorCobrar = met.totalPorCobrar;
-      } else {
-        totalPorCobrar = cuotas.reduce((sum, cuota) => {
-          if (String(cuota.estado).toLowerCase() !== "pagado") {
-            return sum + Number(cuota.monto || 0);
-          }
-          return sum;
-        }, 0);
-      }
-
-      const moraMap = new Map<string, MoraCliente>();
-      if (moraRes.error) {
-        console.error("Error cargando cuotas en mora:", moraRes.error);
-      } else {
-        for (const raw of (moraRes.data ?? []) as unknown as RawCuotaMora[]) {
-          const prestamo = primero(raw.prestamos);
-          const cliente = prestamo ? primero(prestamo.clientes) : null;
-          if (!cliente) continue;
-          const saldo = Number(raw.saldo_pendiente);
-          const dias = diasMora(hoy, raw.fecha_vencimiento);
-          const existente = moraMap.get(cliente.id);
-          if (existente) {
-            existente.montoVencido += saldo;
-            existente.cuotasVencidas += 1;
-            existente.diasMora = Math.max(existente.diasMora, dias);
-          } else {
-            moraMap.set(cliente.id, {
-              id: cliente.id,
-              nombres: cliente.nombres,
-              apellidos: cliente.apellidos,
-              montoVencido: saldo,
-              diasMora: dias,
-              cuotasVencidas: 1,
-            });
-          }
+    if (pagosRes.error) {
+      console.error("Dashboard (pagos):", pagosRes.error.message);
+    } else {
+      for (const p of (pagosRes.data ?? []) as unknown as RawPago[]) {
+        const montoPago = Number(p.monto ?? 0);
+        // Fecha segura: "YYYY-MM-DD" vía substring (evita descuadres UTC).
+        const fechaPagoStr = String(p.fecha_pago ?? "").substring(0, 10);
+        if (fechaPagoStr === hoy) {
+          recaudoHoy += montoPago;
         }
       }
-
-      const mora = Array.from(moraMap.values()).sort(
-        (a, b) => b.montoVencido - a.montoVencido,
-      );
-
-      return {
-        error: null,
-        hoy: met.hoyVal ?? hoy,
-        totalPrestamos: met.prestamosActivos,
-        capitalEnCalle: met.capitalCalle,
-        totalPorCobrar,
-        recaudoHoy: recaudoDelDia,
-        gananciaProyectada: met.gananciaProyectada,
-        gananciaRealCobrada: met.gananciaReal,
-        mora,
-      };
-    } catch (e) {
-      console.error("Error inesperado procesando métricas:", e);
-      return null;
     }
+
+    // 2) Por cobrar HOY, cuotas pendientes (para cartera activa por cuotas) y mora.
+    const [porCobrarRes, moraRes, cuotasPendientesRes] = await Promise.all([
+      supabase
+        .from("cuotas")
+        .select("monto, saldo_pendiente, estado, fecha_vencimiento")
+        .eq("fecha_vencimiento", hoy)
+        .eq("estado", "pendiente"),
+      supabase
+        .from("cuotas")
+        .select(
+          "numero_cuota, saldo_pendiente, estado, fecha_vencimiento, prestamos!inner(clientes!inner(id, nombres, apellidos))",
+        )
+        .lt("fecha_vencimiento", hoy)
+        .in("estado", ESTADOS_POR_COBRAR),
+      supabase.from("cuotas").select("*"),
+    ]);
+
+    // Log de control solicitado
+    if (cuotasPendientesRes.error) {
+      console.error(
+        "Dashboard (cuotas para cartera activa):",
+        cuotasPendientesRes.error.message,
+      );
+    } else {
+      console.log(
+        "Préstamos/Cuotas activas encontradas:",
+        cuotasPendientesRes.data,
+      );
+    }
+
+    // Cartera activa basada en CUOTAS pendientes (no depende solo del estado del préstamo)
+    const prestamosActivosSet = new Set<string>();
+    capitalEnCalle = 0;
+    gananciaProyectada = 0;
+    if (!cuotasPendientesRes.error) {
+      for (const c of (cuotasPendientesRes.data ?? []) as unknown as Array<{
+        id: string;
+        prestamo_id: string;
+        estado?: string | null;
+        monto?: number | null;
+        monto_pagado?: number | null;
+        saldo_pendiente?: number | null;
+      }>) {
+        const estadoCuota = String(c.estado ?? "").toLowerCase();
+        if (estadoCuota === "pagado") continue;
+        const montoCuota = Number(c.monto ?? 0);
+        const montoPagadoCuota = Number(c.monto_pagado ?? 0);
+        if (montoPagadoCuota >= montoCuota) continue;
+        const saldoPendCuota = Number(c.saldo_pendiente ?? 0);
+        if (saldoPendCuota <= 0) continue;
+
+        const prestamo = prestamoPorId.get(c.prestamo_id);
+        if (!prestamo) continue;
+
+        const prop = proporcionGanancia(prestamo);
+        capitalEnCalle += saldoPendCuota * (1 - prop);
+        gananciaProyectada += saldoPendCuota * prop;
+        prestamosActivosSet.add(c.prestamo_id);
+      }
+    }
+    prestamosActivos = prestamosActivosSet.size;
+
+    if (porCobrarRes.error) {
+      console.error(
+        "Dashboard (cuotas con vencimiento hoy):",
+        porCobrarRes.error.message,
+      );
+    } else {
+      for (const cuota of (porCobrarRes.data ?? []) as unknown as RawCuotaHoy[]) {
+        totalPorCobrar += Number(cuota.saldo_pendiente ?? 0);
+        cuotasPorCobrar += 1;
+      }
+    }
+
+    const moraMap = new Map<string, MoraCliente>();
+    if (moraRes.error) {
+      console.error("Dashboard (cuotas en mora):", moraRes.error.message);
+    } else {
+      for (const raw of (moraRes.data ?? []) as unknown as RawCuotaMora[]) {
+        const prestamo = primero(raw.prestamos);
+        const cliente = prestamo ? primero(prestamo.clientes) : null;
+        if (!cliente) continue;
+        const saldo = Number(raw.saldo_pendiente);
+        const dias = diasMora(hoy, raw.fecha_vencimiento);
+        const existente = moraMap.get(cliente.id);
+        if (existente) {
+          existente.montoVencido += saldo;
+          existente.cuotasVencidas += 1;
+          existente.diasMora = Math.max(existente.diasMora, dias);
+        } else {
+          moraMap.set(cliente.id, {
+            id: cliente.id,
+            nombres: cliente.nombres,
+            apellidos: cliente.apellidos,
+            montoVencido: saldo,
+            diasMora: dias,
+            cuotasVencidas: 1,
+          });
+        }
+      }
+    }
+
+    const moraOrdenada = Array.from(moraMap.values()).sort(
+      (a, b) => b.montoVencido - a.montoVencido,
+    );
+
+    return {
+      error: null,
+      hoy,
+      recaudoHoy: Math.round(recaudoHoy * 100) / 100,
+      totalPorCobrar: Math.round(totalPorCobrar * 100) / 100,
+      cuotasPorCobrar,
+      capitalEnCalle: Math.round(capitalEnCalle * 100) / 100,
+      gananciaProyectada: Math.round(gananciaProyectada * 100) / 100,
+      prestamosActivos,
+      totalPrestadoHoy: Math.round(totalPrestadoHoy * 100) / 100,
+      cajaNetaHoy: Math.round((recaudoHoy - totalPrestadoHoy) * 100) / 100,
+      mora: moraOrdenada,
+    };
   }, []);
 
   useEffect(() => {
@@ -279,32 +319,137 @@ export default function Dashboard() {
 
   const montoVencidoTotal = datos?.mora.reduce((s, m) => s + m.montoVencido, 0) ?? 0;
 
-  const recaudoDelDia = datos?.recaudoHoy ?? 0;
-
   const exportarReporte = async () => {
     if (!supabase || !datos) return;
     setExportando(true);
     setErrorGlobal(null);
-    const { data, error } = await supabase
-      .from("pagos")
-      .select(SELECT_PAGOS_REPORTE)
-      .eq("fecha_pago", datos.hoy);
-    setExportando(false);
-    if (error) {
-      setErrorGlobal(`No se pudo exportar el reporte: ${error.message}`);
-      return;
+    try {
+      const [prestamosRes, clientesRes, cuotasRes, pagosRes] = await Promise.all([
+        supabase.from("prestamos").select("*"),
+        supabase
+          .from("clientes")
+          .select("id, nombres, apellidos, dni"),
+        supabase.from("cuotas").select("*"),
+        supabase.from("pagos").select("*"),
+      ]);
+
+      const primerError =
+        prestamosRes.error ??
+        clientesRes.error ??
+        cuotasRes.error ??
+        pagosRes.error;
+      if (primerError) {
+        setErrorGlobal(`No se pudo exportar el reporte: ${primerError.message}`);
+        return;
+      }
+
+      const prestamos = (prestamosRes.data ?? []) as unknown as RawPrestamoExport[];
+      const clientesRaw = (clientesRes.data ?? []) as unknown as RawClienteExport[];
+      const cuotasRaw = (cuotasRes.data ?? []) as unknown as RawCuotaExport[];
+      const pagosRaw = (pagosRes.data ?? []) as unknown as RawPago[];
+
+      const clientePorId = new Map(clientesRaw.map((c) => [c.id, c]));
+
+      const cuotasPorPrestamo = new Map<string, RawCuotaExport[]>();
+      for (const c of cuotasRaw) {
+        if (!c.prestamo_id) continue;
+        const lista = cuotasPorPrestamo.get(c.prestamo_id) ?? [];
+        lista.push(c);
+        cuotasPorPrestamo.set(c.prestamo_id, lista);
+      }
+
+      const r2 = (n: number) => Math.round(n * 100) / 100;
+
+      const saldoDe = (p: RawPrestamoExport): number => {
+        const cuotas = cuotasPorPrestamo.get(p.id) ?? [];
+        return r2(
+          cuotas
+            .filter((c) => String(c.estado ?? "").toLowerCase() !== "pagado")
+            .reduce((acc, c) => acc + Number(c.saldo_pendiente ?? c.monto ?? 0), 0),
+        );
+      };
+
+      const totalPrestado = r2(
+        prestamos.reduce(
+          (acc, p) => acc + Number(p.monto_total ?? p.monto_prestado ?? p.monto ?? 0),
+          0,
+        ),
+      );
+      const totalCobrado = r2(
+        pagosRaw.reduce((acc, p) => acc + Number(p.monto ?? 0), 0),
+      );
+      const saldoPendienteGeneral = r2(
+        cuotasRaw
+          .filter((c) => String(c.estado ?? "").toLowerCase() !== "pagado")
+          .reduce((acc, c) => acc + Number(c.saldo_pendiente ?? c.monto ?? 0), 0),
+      );
+      const cobrosDelDia = r2(
+        pagosRaw
+          .filter(
+            (p) => String(p.fecha_pago ?? "").substring(0, 10) === datos.hoy,
+          )
+          .reduce((acc, p) => acc + Number(p.monto ?? 0), 0),
+      );
+
+      const scores = await obtenerScoresClientes(
+        supabase,
+        prestamos
+          .map((p) => p.cliente_id)
+          .filter((x): x is string => Boolean(x)),
+      );
+
+      const cartera = prestamos.map((p) => {
+        const cliente = p.cliente_id ? clientePorId.get(p.cliente_id) : null;
+        const saldo = saldoDe(p);
+        const finalizado =
+          saldo <= 0 ||
+          ["finalizado", "liquidado", "cancelado"].includes(
+            String(p.estado ?? "").toLowerCase(),
+          );
+        const calificacion = p.cliente_id
+          ? scores.get(p.cliente_id)?.calificacion
+          : undefined;
+        return {
+          cliente: cliente
+            ? `${cliente.nombres} ${cliente.apellidos}`
+            : "Cliente eliminado",
+          dni: cliente?.dni ?? "",
+          calificacion: calificacion
+            ? ETIQUETAS_CALIFICACION[calificacion]
+            : "",
+          monto: Number(p.monto_prestado ?? p.monto ?? 0),
+          saldoPendiente: saldo,
+          estado: finalizado ? "Finalizado" : "Activo",
+        };
+      });
+
+      exportarReporteFinancieroCSV(
+        {
+          totalPrestado,
+          totalCobrado,
+          saldoPendienteGeneral,
+          cobrosDelDia,
+        },
+        cartera,
+        datos.hoy,
+      );
+    } catch {
+      setErrorGlobal(
+        "No se pudo exportar el reporte. Intenta nuevamente.",
+      );
+    } finally {
+      setExportando(false);
     }
-    exportarPagosCSV((data as unknown as PagoExportable[]) ?? [], datos.hoy);
   };
 
   return (
     <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 px-4 py-8 sm:px-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl dark:text-zinc-50">
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-100 sm:text-3xl dark:text-zinc-50">
             Dashboard financiero
           </h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+          <p className="mt-1 text-sm text-slate-400 dark:text-zinc-400">
             {datos
               ? aDate(datos.hoy).toLocaleDateString("es-PE", {
                   weekday: "long",
@@ -319,7 +464,7 @@ export default function Dashboard() {
           type="button"
           onClick={exportarReporte}
           disabled={exportando || cargando}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-zinc-300 px-4 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/50 transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {exportando ? (
             <Spinner />
@@ -344,7 +489,7 @@ export default function Dashboard() {
       </header>
 
       {!supabase && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+        <div className="rounded-lg border border-amber-800 bg-amber-950/60 p-4 text-sm text-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
           Configura las variables{" "}
           <code className="font-mono">NEXT_PUBLIC_SUPABASE_URL</code> y{" "}
           <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> en{" "}
@@ -353,248 +498,132 @@ export default function Dashboard() {
       )}
 
       {errorGlobal && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
+        <div className="rounded-lg border border-red-800 bg-red-950/60 p-4 text-sm text-red-300 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
           {errorGlobal}
         </div>
       )}
 
-      {/* Métricas principales */}
-      <section
-        aria-label="Métricas principales"
-        className="grid grid-cols-2 gap-3 lg:grid-cols-5"
-      >
+{/* TARJETA 1: CAJA DEL DÍA */}
+      <section aria-label="Caja del día" className="rounded-2xl border border-slate-800/80 bg-slate-900/80 p-5 shadow-sm sm:p-6">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+            Caja del Día
+          </p>
+          <span className="shrink-0 rounded-lg bg-teal-950/70 p-2 text-teal-400">
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 3v18h18" />
+              <path d="m7 14 4-4 3 3 5-6" />
+            </svg>
+          </span>
+        </div>
         {cargando || !datos ? (
-          <>
-            {[0, 1, 2, 3, 4].map((i) => (
-              <div
-                key={i}
-                className="h-32 animate-pulse rounded-2xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900"
-              />
-            ))}
-          </>
+          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
         ) : (
           <>
-            <div className="rounded-2xl bg-zinc-900 p-5 text-white dark:bg-zinc-100 dark:text-zinc-900">
-              <p className="text-xs font-medium uppercase tracking-wide opacity-70">
-                Capital en calle
-              </p>
-              <p className="mt-1 truncate text-2xl font-bold">
-                {formatearMoneda(datos.capitalEnCalle)}
-              </p>
-              <p className="mt-1 text-xs opacity-70">
-                {datos.totalPrestamos} préstamos activos
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-sky-200 bg-sky-50 p-5 dark:border-sky-900 dark:bg-sky-950">
-              <p className="text-xs font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400">
-                Total por cobrar
-              </p>
-              <p className="mt-1 truncate text-2xl font-bold text-sky-700 dark:text-sky-300">
-                {formatearMoneda(datos.totalPorCobrar)}
-              </p>
-              <p className="mt-1 truncate text-xs text-sky-600 dark:text-sky-400">
-                Capital + intereses pendientes
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 dark:border-emerald-900 dark:bg-emerald-950">
-              <p className="text-xs font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
-                Recaudo del día
-              </p>
-              <p className="text-2xl font-bold">
-                S/ {Number(recaudoDelDia).toFixed(2)}
-              </p>
-              <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
-                Cobrado hoy
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900 dark:bg-amber-950">
-              <p className="text-xs font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400">
-                Ganancia proyectada
-              </p>
-              <p className="mt-1 truncate text-2xl font-bold text-amber-700 dark:text-amber-300">
-                {formatearMoneda(datos.gananciaProyectada)}
-              </p>
-              <p className="mt-1 truncate text-xs text-amber-600 dark:text-amber-400">
-                Real cobrada: {formatearMoneda(datos.gananciaRealCobrada)}
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-red-200 bg-red-50 p-5 dark:border-red-900 dark:bg-red-950">
-              <p className="text-xs font-medium uppercase tracking-wide text-red-600 dark:text-red-400">
-                Clientes en mora
-              </p>
-              <p className="mt-1 text-2xl font-bold text-red-700 dark:text-red-300">
-                {datos.mora.length}
-              </p>
-              <p className="mt-1 truncate text-xs text-red-600 dark:text-red-400">
-                {formatearMoneda(montoVencidoTotal)} vencido
-              </p>
-            </div>
+            <p className={`mt-3 text-3xl font-black tracking-tight ${datos.cajaNetaHoy < 0 ? "text-red-400" : "text-emerald-400"}`}>
+              {formatearMoneda(datos.cajaNetaHoy)}
+            </p>
+            <p className="mt-3 text-sm font-medium text-slate-400">
+              Cobrado: {formatearMoneda(datos.recaudoHoy)} · Prestado: {formatearMoneda(datos.totalPrestadoHoy)}
+            </p>
           </>
         )}
       </section>
 
-      {/* Alertas de morosidad */}
-      <section className="overflow-hidden rounded-2xl border-2 border-red-200 bg-white shadow-sm dark:border-red-900 dark:bg-red-950/30">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-5 py-3.5 dark:border-red-900 dark:bg-red-950/60">
-          <h2 className="flex items-center gap-2 text-base font-semibold text-red-800 dark:text-red-300">
-            <svg
-              className="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
+      {/* TARJETA 2: COBRANZA DE HOY */}
+      <section aria-label="Cobranza de hoy" className="rounded-2xl border border-slate-800/80 bg-slate-900/80 p-5 shadow-sm sm:p-6">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+            Cobranza de Hoy
+          </p>
+          <span className="shrink-0 rounded-lg bg-amber-950/70 p-2 text-amber-400">
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v5l3 3" />
+            </svg>
+          </span>
+        </div>
+        {cargando || !datos ? (
+          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
+        ) : (
+          <>
+            <p className="mt-3 text-3xl font-black tracking-tight text-emerald-400">
+              {formatearMoneda(datos.totalPorCobrar)}
+            </p>
+            <p className="mt-3 text-sm font-medium text-slate-400">
+              {datos.cuotasPorCobrar} cuota
+              {datos.cuotasPorCobrar === 1 ? "" : "s"} programada
+              {datos.cuotasPorCobrar === 1 ? "" : "s"} para hoy
+            </p>
+            <Link
+              href="/cobros"
+              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-500 px-4 py-3 text-sm font-bold text-white shadow-md shadow-emerald-950/40 transition hover:from-emerald-500 hover:to-teal-400"
             >
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+              </svg>
+              Ir a Ruta de Cobro
+            </Link>
+          </>
+        )}
+      </section>
+
+      {/* TARJETA 3: CAPITAL Y GANANCIA ACTIVA */}
+      <section aria-label="Capital y ganancia activa" className="rounded-2xl border border-slate-800/80 bg-slate-900/80 p-5 shadow-sm sm:p-6">
+        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+          Capital y Ganancia Activa
+        </p>
+        {cargando || !datos ? (
+          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
+        ) : (
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+              <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+                Fierro (capital por recuperar)
+              </p>
+              <p className="mt-1.5 text-2xl font-black tracking-tight text-slate-100">
+                {formatearMoneda(datos.capitalEnCalle)}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+              <p className="text-xs font-bold uppercase tracking-wide text-emerald-400">
+                Ganancia (interés por recuperar)
+              </p>
+              <p className="mt-1.5 text-2xl font-black tracking-tight text-emerald-400">
+                {formatearMoneda(datos.gananciaProyectada)}
+              </p>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* TARJETA 4: CLIENTES EN MORA */}
+      <section aria-label="Clientes en mora" className={`rounded-2xl border-2 p-5 shadow-sm sm:p-6 ${datos && datos.mora.length > 0 ? "border-red-900/60 bg-red-950/30" : "border-slate-800/80 bg-slate-900/80"}`}>
+        <div className="flex items-center justify-between gap-3">
+          <p className={`text-xs font-bold uppercase tracking-wide ${datos && datos.mora.length > 0 ? "text-red-300" : "text-slate-400"}`}>
+            Clientes en Mora
+          </p>
+          <span className={`shrink-0 rounded-lg p-2 ${datos && datos.mora.length > 0 ? "bg-red-900/50 text-red-300" : "bg-slate-800/80 text-slate-400"}`}>
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M21 12a9 9 0 1 1-9-9" />
               <path d="M12 8v4l3 3" />
             </svg>
-            Alertas de morosidad
-          </h2>
-          {!cargando && datos && (
-            <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700 dark:bg-red-900 dark:text-red-300">
-              {datos.mora.length} cliente{datos.mora.length === 1 ? "" : "s"} ·{" "}
-              {formatearMoneda(montoVencidoTotal)}
-            </span>
-          )}
+          </span>
         </div>
-
-        {cargando ? (
-          <div className="flex flex-col gap-2 p-4">
-            {[0, 1, 2].map((i) => (
-              <div key={i} className="h-16 animate-pulse rounded-xl bg-red-50 dark:bg-red-950/40" />
-            ))}
-          </div>
-        ) : datos && datos.mora.length > 0 ? (
-          <ul className="divide-y divide-red-100 dark:divide-red-900">
-            {datos.mora.map((m) => (
-              <li
-                key={m.id}
-                className="flex flex-wrap items-center gap-3 px-5 py-3.5"
-              >
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100 text-xs font-semibold text-red-700 dark:bg-red-900 dark:text-red-300">
-                  {iniciales(m.nombres, m.apellidos)}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                    {m.nombres} {m.apellidos}
-                  </p>
-                  <p className="text-xs text-red-600 dark:text-red-400">
-                    {m.diasMora} día{m.diasMora === 1 ? "" : "s"} de mora ·{" "}
-                    {m.cuotasVencidas} cuota{m.cuotasVencidas === 1 ? "" : "s"} vencida
-                    {m.cuotasVencidas === 1 ? "" : "s"}
-                  </p>
-                </div>
-                <span className="shrink-0 rounded-lg bg-red-100 px-3 py-1.5 text-sm font-bold text-red-700 dark:bg-red-900 dark:text-red-300">
-                  {formatearMoneda(m.montoVencido)}
-                </span>
-              </li>
-            ))}
-          </ul>
+        {cargando || !datos ? (
+          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
         ) : (
-          <div className="px-5 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">
-            Sin clientes en mora. ¡Todo al día!
-          </div>
+          <>
+            <p className={`mt-3 text-3xl font-black tracking-tight ${datos.mora.length > 0 ? "text-red-300" : "text-slate-100"}`}>
+              {formatearMoneda(montoVencidoTotal)}
+            </p>
+            <p className="mt-3 text-sm font-medium text-slate-400">
+              {datos.mora.length} cliente
+              {datos.mora.length === 1 ? "" : "s"} moroso
+              {datos.mora.length === 1 ? "" : "s"}
+            </p>
+          </>
         )}
-      </section>
-
-      {/* Acciones rápidas */}
-      <section>
-        <h2 className="mb-3 text-base font-semibold text-zinc-900 dark:text-zinc-50">
-          Acciones rápidas
-        </h2>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Link
-            href="/"
-            className="group flex items-center gap-3 rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm transition hover:border-zinc-900 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-500"
-          >
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">
-              <svg
-                className="h-5 w-5"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                <circle cx="9" cy="7" r="4" />
-                <path d="M19 8v6M22 11h-6" />
-              </svg>
-            </span>
-            <span>
-              <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                Registrar cliente
-              </span>
-              <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-                Alta de un nuevo cliente
-              </span>
-            </span>
-          </Link>
-
-          <Link
-            href="/prestamos/nuevo"
-            className="group flex items-center gap-3 rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm transition hover:border-zinc-900 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-500"
-          >
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">
-              <svg
-                className="h-5 w-5"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-            </span>
-            <span>
-              <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                Nuevo préstamo
-              </span>
-              <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-                Genera préstamo y cronograma
-              </span>
-            </span>
-          </Link>
-
-          <Link
-            href="/cobros"
-            className="group flex items-center gap-3 rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm transition hover:border-zinc-900 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-500"
-          >
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white">
-              <svg
-                className="h-5 w-5"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-              </svg>
-            </span>
-            <span>
-              <span className="block text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-                Ruta de cobro del día
-              </span>
-              <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-                Cobros pendientes de hoy
-              </span>
-            </span>
-          </Link>
-        </div>
       </section>
     </main>
   );

@@ -14,9 +14,14 @@ export const crearLinkWhatsApp = (telefono: string, mensaje: string) =>
 export function mensajeRecordatorio(p: {
   nombres: string;
   numeroCuota: number;
-  monto: number;
+  montoCuota: number;
+  saldoPendiente?: number;
+  fechaVencimiento?: string;
 }) {
-  return `Hola ${p.nombres}, te recordamos que tu cuota N° ${p.numeroCuota} por S/ ${moneda(p.monto)} vence hoy.`;
+  const montoAMostrar = p.saldoPendiente ?? p.montoCuota;
+  const textoFecha = p.fechaVencimiento ? `vence el *${p.fechaVencimiento}*` : "vence hoy";
+
+  return `Hola *${p.nombres}*, te recordamos que tu cuota N° ${p.numeroCuota} ${textoFecha} tiene un monto a pagar de *S/ ${moneda(montoAMostrar)}*.`;
 }
 
 export function mensajeComprobante(p: {
@@ -25,5 +30,5 @@ export function mensajeComprobante(p: {
   numeroCuota: number;
   saldoPendiente: number;
 }) {
-  return `Hola ${p.nombres}, confirmamos la recepción de tu pago de S/ ${moneda(p.montoPagado)} correspondiente a la cuota #${p.numeroCuota}. Tu saldo pendiente es S/ ${moneda(p.saldoPendiente)}. ¡Gracias!`;
+  return `Hola *${p.nombres}*, confirmamos la recepción de tu pago de *S/ ${moneda(p.montoPagado)}* correspondiente a la cuota #${p.numeroCuota}. Tu saldo pendiente es *S/ ${moneda(p.saldoPendiente)}*. ¡Gracias!`;
 }

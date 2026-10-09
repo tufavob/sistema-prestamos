@@ -7,6 +7,8 @@ export const FRECUENCIAS: ReadonlyArray<{ value: Frecuencia; label: string }> = 
   { value: "mensual", label: "Mensual" },
 ];
 
+export const TASAS_INTERES: readonly number[] = [5, 10, 15, 20];
+
 export type CuotaPreview = {
   numero: number;
   monto: number;

@@ -1,23 +1,40 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { formatearMoneda, FRECUENCIAS, type Frecuencia } from "@/lib/prestamos";
+import {
+  ETIQUETAS_CALIFICACION,
+  obtenerScoresClientes,
+  type Calificacion,
+} from "@/lib/credito";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
-type ClientePrestamo = { nombres: string; apellidos: string };
+type TipoFiltro = "activos" | "finalizados" | "todos";
+
+type ClientePrestamo = { id: string; nombres: string; apellidos: string };
+
+type CuotaPrestamo = {
+  estado: string | null;
+  monto: number;
+  saldo_pendiente?: number | null;
+};
 
 type Prestamo = {
   id: string;
-  monto: number;
+  monto_prestado: number;
   monto_total: number;
+  porcentaje_interes?: number | null;
   frecuencia: Frecuencia;
   numero_cuotas: number;
   saldo_pendiente: number;
+  estado?: string | null;
   fecha_inicio: string;
   clientes: ClientePrestamo | ClientePrestamo[] | null;
+  cuotas?: CuotaPrestamo[] | null;
+  calificacion?: Calificacion;
 };
 
 type ResultadoPrestamos = {
@@ -33,23 +50,98 @@ const nombreCompleto = (c: ClientePrestamo) => `${c.nombres} ${c.apellidos}`;
 const labelFrecuencia = (f: string) =>
   FRECUENCIAS.find((x) => x.value === f)?.label ?? f;
 
+const TITULOS_FILTRO: Record<TipoFiltro, string> = {
+  activos: "Activos",
+  finalizados: "Finalizados",
+  todos: "Todos",
+};
+
+const esFinalizado = (p: Prestamo): boolean => {
+  const est = String(p.estado ?? "").toLowerCase();
+  return (
+    est === "finalizado" ||
+    est === "liquidado" ||
+    est === "cancelado" ||
+    Number(p.saldo_pendiente) <= 0
+  );
+};
+
+const redondear2 = (n: number) => Math.round(n * 100) / 100;
+
+const computarSaldo = (p: Prestamo): { saldo: number } => {
+  const saldo = redondear2(
+    (Array.isArray(p.cuotas) ? p.cuotas : [])
+      .filter((c) => String(c.estado ?? "").toLowerCase() !== "pagado")
+      .reduce(
+        (acc, c) => acc + Number(c.saldo_pendiente ?? c.monto ?? 0),
+        0,
+      ),
+  );
+  return { saldo: Math.max(0, saldo) };
+};
+
+const CLASES_CALIFICACION: Record<Calificacion, string> = {
+  excelente: "bg-emerald-500/10 border border-emerald-500/30 text-emerald-400",
+  bueno: "bg-sky-500/10 border border-sky-500/30 text-sky-400",
+  regular: "bg-amber-500/10 border border-amber-500/30 text-amber-400",
+  malo: "bg-red-500/10 border border-red-500/30 text-red-400",
+};
+
 export default function Prestamos() {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [prestamos, setPrestamos] = useState<Prestamo[]>([]);
+  const [filtro, setFiltro] = useState<TipoFiltro>("activos");
+
+  const conteos = useMemo(
+    () => ({
+      activos: prestamos.filter((p) => !esFinalizado(p)).length,
+      finalizados: prestamos.filter(esFinalizado).length,
+      todos: prestamos.length,
+    }),
+    [prestamos],
+  );
+
+  const visibles = useMemo(() => {
+    if (filtro === "activos") return prestamos.filter((p) => !esFinalizado(p));
+    if (filtro === "finalizados") return prestamos.filter(esFinalizado);
+    return prestamos;
+  }, [filtro, prestamos]);
 
   const obtenerPrestamos = useCallback(async (): Promise<ResultadoPrestamos | null> => {
     if (!supabase) return null;
     const { data, error } = await supabase
       .from("prestamos")
       .select(
-        "id, monto, monto_total, frecuencia, numero_cuotas, saldo_pendiente, fecha_inicio, clientes(nombres, apellidos)",
+        "*, clientes(*), cuotas(estado, monto, saldo_pendiente)",
       )
       .order("created_at", { ascending: false });
 
+    const crudos = (data ?? []) as unknown as Prestamo[];
+    const clienteIds = [
+      ...new Set(
+        crudos
+          .map((p) => primero(p.clientes)?.id)
+          .filter((x): x is string => Boolean(x)),
+      ),
+    ];
+    const scores = await obtenerScoresClientes(supabase, clienteIds);
+
+    const prestamos = crudos.map((p) => {
+      const { saldo } = computarSaldo(p);
+      const clienteId = primero(p.clientes)?.id;
+      return {
+        ...p,
+        saldo_pendiente: saldo,
+        estado: saldo <= 0 ? "finalizado" : p.estado,
+        calificacion: clienteId ? scores.get(clienteId)?.calificacion : undefined,
+        cuotas: undefined,
+      };
+    });
+
     return {
       error: error ? `No se pudieron cargar los préstamos: ${error.message}` : null,
-      prestamos: (data ?? []) as unknown as Prestamo[],
+      prestamos,
     };
   }, []);
 
@@ -72,19 +164,19 @@ export default function Prestamos() {
   }, [obtenerPrestamos]);
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-8 sm:px-6">
+    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 bg-slate-950 px-4 py-8 text-slate-100 sm:px-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl dark:text-zinc-50">
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-100 sm:text-3xl">
             Lista de préstamos
           </h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+          <p className="mt-1 text-sm text-slate-400">
             Todos los préstamos registrados en el sistema.
           </p>
         </div>
         <Link
           href="/prestamos/nuevo"
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 px-4 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/50 transition hover:from-emerald-500"
         >
           <svg
             className="h-4 w-4"
@@ -103,7 +195,7 @@ export default function Prestamos() {
       </header>
 
       {!supabase && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+        <div className="rounded-lg border border-amber-800 bg-amber-950/60 p-4 text-sm text-amber-300">
           Configura las variables{" "}
           <code className="font-mono">NEXT_PUBLIC_SUPABASE_URL</code> y{" "}
           <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> en{" "}
@@ -112,100 +204,208 @@ export default function Prestamos() {
       )}
 
       {error && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
+        <div className="rounded-lg border border-red-800 bg-red-950/60 p-4 text-sm text-red-300">
           {error}
         </div>
       )}
 
-      <section className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+      <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 shadow-xl text-slate-100">
+        {!cargando && prestamos.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950 p-4">
+            {(["activos", "finalizados", "todos"] as TipoFiltro[]).map((t) => {
+              const activoTab = filtro === t;
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setFiltro(t)}
+                  className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold transition ${
+                    activoTab
+                      ? "border border-emerald-500 bg-emerald-600 font-bold text-slate-950 shadow-lg shadow-emerald-950/50"
+                      : "border border-slate-800 bg-slate-950/80 text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {TITULOS_FILTRO[t]}
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                      activoTab
+                        ? "bg-slate-950/25 text-slate-950"
+                        : "bg-slate-800/70 text-slate-400"
+                    }`}
+                  >
+                    {conteos[t]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {cargando ? (
           <div className="flex flex-col gap-2 p-4">
             {[0, 1, 2, 3].map((i) => (
               <div
                 key={i}
-                className="h-12 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-800/60"
+                className="h-12 animate-pulse rounded-xl bg-slate-800/60"
               />
             ))}
           </div>
         ) : prestamos.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-5 py-12 text-center">
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            <p className="text-sm text-slate-400">
               No hay préstamos registrados todavía.
             </p>
             <Link
               href="/prestamos/nuevo"
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 px-4 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/50 transition hover:from-emerald-500"
             >
               Registrar el primero
             </Link>
           </div>
+        ) : visibles.length === 0 ? (
+          <div className="px-5 py-12 text-center text-sm text-slate-400">
+            No hay préstamos {filtro === "finalizados" ? "finalizados" : "activos"}.
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
-              <thead className="bg-zinc-50 dark:bg-zinc-800/60">
-                <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-                  <th className="px-5 py-3 font-semibold">Cliente</th>
-                  <th className="px-5 py-3 text-right font-semibold">
+              <thead className="bg-slate-950">
+                <tr className="text-xs uppercase tracking-wider text-slate-400">
+                  <th className="border-b border-slate-800 px-5 py-3 font-semibold">Cliente</th>
+                  <th className="border-b border-slate-800 px-5 py-3 font-semibold">Calificación</th>
+                  <th className="border-b border-slate-800 px-5 py-3 text-right font-semibold">
                     Monto prestado
                   </th>
-                  <th className="px-5 py-3 font-semibold">Frecuencia</th>
-                  <th className="px-5 py-3 text-center font-semibold">
+                  <th className="border-b border-slate-800 px-5 py-3 text-right font-semibold">
+                    Saldo Pendiente
+                  </th>
+                  <th className="border-b border-slate-800 px-5 py-3 font-semibold">Frecuencia</th>
+                  <th className="border-b border-slate-800 px-5 py-3 text-center font-semibold">
                     N° Cuotas
                   </th>
-                  <th className="px-5 py-3 font-semibold">Estado</th>
-                  <th className="px-5 py-3 text-right font-semibold">Acciones</th>
+                  <th className="border-b border-slate-800 px-5 py-3 font-semibold">Estado</th>
+                  <th className="border-b border-slate-800 px-5 py-3 text-right font-semibold">Acciones</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {prestamos.map((p) => {
+              <tbody>
+                {visibles.map((p) => {
                   const cliente = primero(p.clientes);
-                  const activo = Number(p.saldo_pendiente) > 0;
+                  const finalizado = esFinalizado(p);
                   return (
-                    <tr key={p.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
+                    <tr key={p.id} className="border-b border-slate-800/80 text-slate-200 transition-colors hover:bg-slate-800/50">
                       <td className="px-5 py-3.5">
-                        <p className="font-medium text-zinc-900 dark:text-zinc-50">
+                        <p className="font-bold text-slate-100">
                           {cliente ? nombreCompleto(cliente) : "Cliente eliminado"}
                         </p>
                       </td>
-                      <td className="px-5 py-3.5 text-right font-semibold text-zinc-900 dark:text-zinc-50">
-                        {formatearMoneda(Number(p.monto))}
+                      <td className="px-5 py-3.5">
+                        {p.calificacion ? (
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold ${
+                              CLASES_CALIFICACION[p.calificacion]
+                            }`}
+                          >
+                            {ETIQUETAS_CALIFICACION[p.calificacion]}
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">—</span>
+                        )}
                       </td>
-                      <td className="px-5 py-3.5 text-zinc-600 dark:text-zinc-300">
+                       <td className="px-5 py-3.5 text-right font-bold text-slate-100">
+                         {formatearMoneda(Number(p.monto_prestado || 0))}
+                       </td>
+                      <td className="px-5 py-3.5 text-right">
+                        <span
+                          className={`font-bold ${
+                            finalizado
+                              ? "text-emerald-400"
+                              : "text-slate-300"
+                          }`}
+                        >
+                          {formatearMoneda(Number(p.saldo_pendiente))}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3.5 text-slate-300">
                         {labelFrecuencia(p.frecuencia)}
                       </td>
-                      <td className="px-5 py-3.5 text-center text-zinc-600 dark:text-zinc-300">
+                      <td className="px-5 py-3.5 text-center text-slate-300">
                         {p.numero_cuotas}
                       </td>
                       <td className="px-5 py-3.5">
                         <span
                           className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
-                            activo
-                              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                            finalizado
+                              ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                              : "border border-amber-500/30 bg-amber-500/10 text-amber-400"
                           }`}
                         >
-                          {activo ? "Activo" : "Pagado"}
-                        </span>
+                           {String(finalizado ? "finalizado" : (p.estado || "activo")).toLowerCase()}
+                         </span>
                       </td>
                       <td className="px-5 py-3.5 text-right">
-                        <Link
-                          href={`/prestamos/${p.id}`}
-                          className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-zinc-300 px-3 text-xs font-semibold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                        >
-                          Ver Detalle / Cronograma
-                          <svg
-                            className="h-3.5 w-3.5"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            aria-hidden="true"
-                          >
-                            <path d="M5 12h14M12 5l7 7-7 7" />
-                          </svg>
-                        </Link>
+                        <div className="flex items-center justify-end gap-2">
+                          {finalizado ? (
+                            <>
+                              {cliente && (
+                                <Link
+                                  href={`/prestamos/nuevo?cliente_id=${cliente.id}`}
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-500"
+                                >
+                                  <svg
+                                    className="h-3.5 w-3.5"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2.5"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    aria-hidden="true"
+                                  >
+                                    <path d="M12 5v14M5 12h14" />
+                                  </svg>
+                                  Renovar Préstamo
+                                </Link>
+                              )}
+                              <Link
+                                href={`/prestamos/${p.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700"
+                              >
+                                <svg
+                                  className="h-3.5 w-3.5"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2.5"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="M5 12h14M12 5l7 7-7 7" />
+                                </svg>
+                                Ver Cronograma
+                              </Link>
+                            </>
+                          ) : (
+                            <Link
+                              href={`/prestamos/${p.id}`}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-slate-700"
+                            >
+                              <svg
+                                className="h-3.5 w-3.5"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path d="M5 12h14M12 5l7 7-7 7" />
+                              </svg>
+                              Ver Detalle / Cronograma
+                            </Link>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

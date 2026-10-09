@@ -31,22 +31,22 @@ function validarFecha(s: string): string | null {
   return null;
 }
 
-function traducirError(rpcMsg: string): string {
-  const msg = rpcMsg.toLowerCase();
-  if (msg.includes("cuota no encontrada"))
-    return "La cuota ya no existe o no tienes permiso para registrarla.";
-  if (msg.includes("no puede superar el saldo"))
-    return "El monto supera el saldo pendiente de la cuota.";
-  if (msg.includes("mayor a cero")) return "El monto debe ser mayor a cero.";
+function redondear(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+function traducirError(mensaje: string): string {
+  const msg = mensaje.toLowerCase();
   if (msg.includes("row-level security") || msg.includes("permission denied"))
     return "Tu sesión expiró o no tienes permisos. Vuelve a iniciar sesión.";
-  return rpcMsg;
+  return mensaje;
 }
 
 export async function registrarCobro(input: {
   cuotaId: string;
   monto: number;
   fecha: string;
+  medioPago?: string;
 }): Promise<ResultadoCobro> {
   if (!hasAuthConfig) {
     return { ok: false, error: "Supabase no configurado" };
@@ -67,20 +67,124 @@ export async function registrarCobro(input: {
 
   const supabase = await createServerSupabase();
 
-  const { error } = await supabase.rpc("pagar_cuota", {
-    p_cuota_id: input.cuotaId,
-    p_monto: input.monto,
-    p_fecha: input.fecha,
-  });
+  // 1) Leer la cuota para decidir pago total / abono parcial.
+  const { data: cuota, error: errorLectura } = await supabase
+    .from("cuotas")
+    .select(
+      "prestamo_id, monto, monto_pagado, saldo_pendiente, prestamos(saldo_pendiente)",
+    )
+    .eq("id", input.cuotaId)
+    .maybeSingle();
 
-  if (error) {
-    return { ok: false, error: traducirError(error.message) };
+  if (errorLectura) {
+    return { ok: false, error: traducirError(errorLectura.message) };
+  }
+  if (!cuota) {
+    return {
+      ok: false,
+      error: "La cuota ya no existe o no tienes permiso para registrarla.",
+    };
   }
 
-  revalidatePath("/");
-  revalidatePath("/prestamos");
-  revalidatePath("/cobros");
+  const montoCuota = Number(cuota.monto ?? 0);
+  const yaPagado = Number(cuota.monto_pagado ?? 0);
+  const nuevoPagado = Math.min(montoCuota, redondear(yaPagado + input.monto));
+  const saldoCuota = Math.max(0, redondear(montoCuota - nuevoPagado));
+  const estadoFinal = nuevoPagado >= montoCuota ? "pagado" : "parcial";
+
+  // 2) Actualizar la cuota (pago total -> 'pagado'; abono parcial -> 'parcial').
+  const actualizacion: Record<string, string | number> = {
+    estado: estadoFinal,
+    monto_pagado: nuevoPagado,
+    saldo_pendiente: saldoCuota,
+  };
+  if (estadoFinal === "pagado") {
+    actualizacion.fecha_pago = input.fecha;
+  }
+
+  const { error: errorCuota } = await supabase
+    .from("cuotas")
+    .update(actualizacion)
+    .eq("id", input.cuotaId);
+
+  if (errorCuota) {
+    return {
+      ok: false,
+      error: `No se pudo actualizar la cuota: ${traducirError(errorCuota.message)}`,
+    };
+  }
+
+  // 3) Descontar el saldo del préstamo (mismo efecto que el antiguo RPC).
+  //    Cuando llega a 0, el préstamo pasa automáticamente a estado FINALIZADO.
+  const prestamos = Array.isArray(cuota.prestamos)
+    ? cuota.prestamos[0]
+    : cuota.prestamos;
+  const saldoPrestamo = Number(prestamos?.saldo_pendiente ?? 0);
+  const nuevoSaldoPrestamo = Math.max(
+    0,
+    redondear(saldoPrestamo - input.monto),
+  );
+  const actualizacionPrestamo: Record<string, string | number> = {
+    saldo_pendiente: nuevoSaldoPrestamo,
+  };
+  if (nuevoSaldoPrestamo <= 0) actualizacionPrestamo.estado = "liquidado";
+  const { error: errorPrestamo } = await supabase
+    .from("prestamos")
+    .update(actualizacionPrestamo)
+    .eq("id", cuota.prestamo_id);
+
+  if (errorPrestamo) {
+    return {
+      ok: false,
+      error: `La cuota se guardó, pero no se pudo actualizar el préstamo: ${traducirError(errorPrestamo.message)}`,
+    };
+  }
+
+  // 4) Registrar el ingreso en `pagos` (columna estándar fecha_pago).
+  const medioPago =
+    input.medioPago === "yape" ||
+    input.medioPago === "plin" ||
+    input.medioPago === "transferencia"
+      ? input.medioPago
+      : "efectivo";
+  const esAbonoParcial = estadoFinal === "parcial";
+
+  const { data: sesion } = await supabase.auth.getUser();
+  const basePago = {
+    cuota_id: input.cuotaId,
+    monto: redondear(input.monto),
+    fecha_pago: input.fecha,
+    ...(sesion.user?.id ? { user_id: sesion.user.id } : {}),
+  };
+  let errorPago: { message: string } | null = null;
+  const { error: errorPagoMeta } = await supabase.from("pagos").insert({
+    ...basePago,
+    medio_pago: medioPago,
+    es_abono_parcial: esAbonoParcial,
+  });
+  errorPago = errorPagoMeta;
+  if (
+    errorPago &&
+    /column|does not exist|es_abono_parcial|medio_pago/i.test(errorPago.message)
+  ) {
+    const { error: errorPagoBase } = await supabase.from("pagos").insert(basePago);
+    errorPago = errorPagoBase;
+  }
+
+  if (errorPago) {
+    return {
+      ok: false,
+      error: `La cuota se guardó, pero no se pudo registrar en "pagos": ${traducirError(errorPago.message)}`,
+    };
+  }
+
+  revalidatePath("/reportes");
   revalidatePath("/dashboard");
+  revalidatePath("/prestamos");
+  revalidatePath("/prestamos/[id]");
+  revalidatePath("/cobros");
+  revalidatePath("/");
 
   return { ok: true, error: null };
 }
+  // ensure cache

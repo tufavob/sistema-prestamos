@@ -13,6 +13,7 @@ const ENLACES = [
   { href: "/", label: "Clientes" },
   { href: "/prestamos", label: "Préstamos" },
   { href: "/cobros", label: "Cobros del Día" },
+  { href: "/reportes", label: "Reportes" },
 ];
 
 export default function Navbar() {
@@ -47,13 +48,13 @@ export default function Navbar() {
     href === "/" ? pathname === "/" : pathname.startsWith(href);
 
   return (
-    <header className="sticky top-0 z-20 border-b border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
+    <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur print:hidden">
       <nav className="mx-auto flex w-full max-w-6xl items-center gap-3 px-4 py-3 sm:px-6">
         <Link
           href="/dashboard"
-          className="flex shrink-0 items-center gap-2 font-semibold text-zinc-900 dark:text-zinc-50"
+          className="flex shrink-0 items-center gap-2 font-semibold text-slate-100"
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-zinc-900 text-sm font-bold text-white dark:bg-zinc-100 dark:text-zinc-900">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-400 text-sm font-bold text-white shadow-lg shadow-emerald-950/40">
             S
           </span>
           <span className="hidden whitespace-nowrap sm:block">
@@ -69,8 +70,8 @@ export default function Navbar() {
               aria-current={estaActivo(l.href) ? "page" : undefined}
               className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition ${
                 estaActivo(l.href)
-                  ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                  ? "bg-gradient-to-r from-emerald-600 to-teal-500 text-white shadow-md shadow-emerald-950/40"
+                  : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
               }`}
             >
               {l.label}
@@ -82,7 +83,7 @@ export default function Navbar() {
           <button
             type="button"
             onClick={cerrarSesion}
-            className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+            className="shrink-0 whitespace-nowrap rounded-lg border border-emerald-600/40 px-3 py-2 text-sm font-medium text-emerald-400 transition hover:bg-emerald-950/40 hover:text-emerald-300"
           >
             Cerrar sesión
           </button>

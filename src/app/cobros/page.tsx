@@ -6,11 +6,7 @@ import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { aYMD, formatearMoneda, hoyLocal } from "@/lib/prestamos";
 import { crearLinkWhatsApp, mensajeComprobante, mensajeRecordatorio } from "@/lib/whatsapp";
-import {
-  exportarPagosCSV,
-  SELECT_PAGOS_REPORTE,
-  type PagoExportable,
-} from "@/lib/exportar";
+import { exportarCobrosRutaCSV } from "@/lib/exportar";
 import { registrarCobro } from "@/lib/acciones";
 
 const supabase = hasAuthConfig ? createClient() : null;
@@ -19,6 +15,7 @@ type ClienteCobro = {
   id: string;
   nombres: string;
   apellidos: string;
+  dni: string | null;
   telefono: string | null;
   direccion: string | null;
   referencia: string | null;
@@ -26,7 +23,7 @@ type ClienteCobro = {
 
 type Cobro = {
   id: string;
-  numero: number;
+  numero_cuota: number;
   monto: number;
   fecha_vencimiento: string;
   estado: "pendiente" | "parcial" | "vencido" | "pagado";
@@ -68,21 +65,51 @@ const fechaPagoEsHoy = (c: Cobro) => {
 };
 
 const inputCls =
-  "w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 dark:placeholder:text-zinc-500 dark:focus:border-zinc-200";
+  "w-full rounded-lg border border-slate-800 bg-slate-950/70 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20";
 
 const formatearFechaDB = (s: string) => {
+  if (!s) return "";
   const [y, m, d] = s.split("-").map(Number);
   if (!y || !m || !d) return s;
-  return new Date(y, m - 1, d).toLocaleDateString("es-PE", {
+  const fecha = new Date(y, m - 1, d);
+  return fecha.toLocaleDateString("es-PE", {
     day: "2-digit",
     month: "short",
   });
+};
+
+const extraerHora = (iso?: string | null): string => {
+  if (!iso) return "";
+  const m = String(iso).match(/(\d{2}):(\d{2})/);
+  return m ? `${m[1]}:${m[2]}` : "";
 };
 
 const iniciales = (c: ClienteCobro) =>
   `${c.nombres.charAt(0)}${c.apellidos.charAt(0)}`.toUpperCase() || "?";
 
 const nombreCompleto = (c: ClienteCobro) => `${c.nombres} ${c.apellidos}`;
+
+const Spinner = () => (
+  <svg
+    className="h-4 w-4 animate-spin text-current"
+    viewBox="0 0 24 24"
+    fill="none"
+  >
+    <circle
+      className="opacity-25"
+      cx="12"
+      cy="12"
+      r="10"
+      stroke="currentColor"
+      strokeWidth="4"
+    />
+    <path
+      className="opacity-75"
+      fill="currentColor"
+      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+    />
+  </svg>
+);
 
 type PagoRegistrado = {
   nombres: string;
@@ -105,12 +132,15 @@ const WhatsAppIcon = ({ className }: { className?: string }) => (
 
 type RawPrestamo = {
   numero_cuotas: number;
+  estado?: string | null;
+  saldo_pendiente?: number | null;
   clientes: ClienteCobro | ClienteCobro[] | null;
 };
 
 type RawCobro = {
   id: string;
-  numero: number;
+  numero_cuota: number;
+  numero?: number;
   monto: number;
   fecha_vencimiento: string;
   estado: Cobro["estado"];
@@ -126,6 +156,14 @@ type RawCobroPagada = RawCobro & {
   updated_at?: string | null;
 };
 
+const esPrestamoActivoConSaldo = (raw: RawCobro | RawCobroPagada): boolean => {
+  const p = Array.isArray(raw.prestamos) ? raw.prestamos[0] : raw.prestamos;
+  if (!p) return false;
+  const estado = String(p.estado ?? "").toLowerCase();
+  const saldo = Number(p.saldo_pendiente ?? 0);
+  return estado === "activo" && saldo > 0;
+};
+
 const normalizarCobros = (raw: RawCobro[]): Cobro[] =>
   raw.map((r) => {
     const p = Array.isArray(r.prestamos) ? r.prestamos[0] : r.prestamos;
@@ -133,7 +171,7 @@ const normalizarCobros = (raw: RawCobro[]): Cobro[] =>
     const cliente = Array.isArray(c) ? c[0] : c;
     return {
       id: r.id,
-      numero: r.numero,
+      numero_cuota: r.numero_cuota ?? r.numero ?? 0,
       monto: r.monto,
       fecha_vencimiento: r.fecha_vencimiento,
       estado: r.estado,
@@ -164,35 +202,36 @@ export default function Cobros() {
   const [exportando, setExportando] = useState(false);
 
   type ResultadoCobros = {
-  error: string | null;
-  cobros: Cobro[];
-  totalACobrar: number;
-  totalRecaudado: number;
-  hoy: string;
-};
+    error: string | null;
+    cobros: Cobro[];
+    totalACobrar: number;
+    totalRecaudado: number;
+    hoy: string;
+  };
 
-const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
+  const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     if (!supabase) return null;
     const hoy = aYMD(hoyLocal());
     const hoySVE = new Date().toLocaleDateString("sv-SE");
 
-    // Uso `*` para no depender de columnas específicas de cada entorno.
     const seleccionCuotas =
-      "*, prestamos!inner(numero_cuotas, clientes!inner(id, nombres, apellidos, telefono, direccion, referencia))";
+      "*, prestamos!inner(numero_cuotas, estado, saldo_pendiente, clientes!inner(id, nombres, apellidos, dni, telefono, direccion, referencia))";
 
-    const [respDia, respPagadas] = await Promise.all([
+    const [respPendientes, respPagadas] = await Promise.all([
       supabase
         .from("cuotas")
         .select(seleccionCuotas)
-        .eq("fecha_vencimiento", hoy)
-        .in("estado", ["pendiente", "parcial", "vencido", "pagado"])
+        .lte("fecha_vencimiento", hoy)
+        .in("estado", ["pendiente", "parcial", "vencido"])
+        .eq("prestamos.estado", "activo")
+        .gt("prestamos.saldo_pendiente", 0)
         .order("fecha_vencimiento", { ascending: true }),
       supabase.from("cuotas").select(seleccionCuotas).eq("estado", "pagado"),
     ]);
 
-    if (respDia.error) {
+    if (respPendientes.error) {
       return {
-        error: `No se pudieron cargar los cobros: ${respDia.error.message}. Revisa que la tabla "cuotas" tenga la columna fecha_vencimiento (migración 02).`,
+        error: `No se pudieron cargar los cobros: ${respPendientes.error.message}.`,
         cobros: [],
         totalACobrar: 0,
         totalRecaudado: 0,
@@ -200,14 +239,12 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
       };
     }
 
-    const diaCuotas = normalizarCobros((respDia.data as unknown as RawCobro[]) ?? []);
+    const cuotasPendientes = normalizarCobros((respPendientes.data as unknown as RawCobro[]) ?? []);
 
-    // Recaudado hoy = cuotas pagadas cuyo cobro se registró HOY.
-    // (updated_at o fecha_pago de la cuota; si no hay fecha, se asume hoy.)
     let recaudadoHoy = 0;
     const pagadasHoy: RawCobroPagada[] = [];
     if (respPagadas.error) {
-      for (const c of diaCuotas) {
+      for (const c of cuotasPendientes) {
         if (c.estado === "pagado") recaudadoHoy += Number(c.monto);
       }
     } else {
@@ -217,27 +254,25 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
           ? new Date(fechaPago).toLocaleDateString("sv-SE") === hoySVE
           : true;
         if (esHoy) {
-          pagadasHoy.push(raw);
           recaudadoHoy += Number(raw.monto_pagado ?? raw.monto ?? 0);
+          if (esPrestamoActivoConSaldo(raw)) pagadasHoy.push(raw);
         }
       }
     }
 
-    // Listado: cuotas del día + pagadas hoy con vencimiento distinto
-    // (pago adelantado o atrasado).
-    const cobros = [...diaCuotas];
-    const idsActuales = new Set(cobros.map((c) => c.id));
+    const cobrosList = [...cuotasPendientes];
+    const idsActuales = new Set(cobrosList.map((c) => c.id));
     for (const raw of pagadasHoy) {
       if (idsActuales.has(raw.id)) continue;
       idsActuales.add(raw.id);
-      cobros.push(normalizarCobros([raw])[0]);
+      cobrosList.push(normalizarCobros([raw])[0]);
     }
 
     return {
       error: null,
-      cobros,
-      totalACobrar: diaCuotas.reduce(
-        (s, c) => (c.estado === "pendiente" ? s + Number(c.monto) : s),
+      cobros: cobrosList,
+      totalACobrar: cuotasPendientes.reduce(
+        (s, c) => (c.estado !== "pagado" ? s + Number(c.saldo_pendiente) : s),
         0,
       ),
       totalRecaudado: recaudadoHoy,
@@ -321,19 +356,17 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
       setErrorGlobal(`No se pudo registrar el pago: ${res.error}`);
       return;
     }
-    setMensaje(
-      `Cuota ${c.numero} pagada. Registrado en el historial de pagos.`,
-    );
+    setMensaje(`Cuota ${c.numero_cuota} pagada. Registrado en el historial.`);
     const cliente = c.prestamos?.clientes ?? null;
     setPagoRegistrado(
       cliente
         ? {
             nombres: `${cliente.nombres} ${cliente.apellidos}`,
             telefono: cliente.telefono,
-            montoPagado: Number(c.saldo_pendiente),
-            numeroCuota: c.numero,
-            saldoPendiente: 0,
-          }
+             montoPagado: Number(c.saldo_pendiente),
+             numeroCuota: c.numero_cuota,
+             saldoPendiente: 0,
+           }
         : null,
     );
     router.refresh();
@@ -372,9 +405,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
       setErrorGlobal(`No se pudo registrar el abono: ${res.error}`);
       return;
     }
-    setMensaje(
-      `Abono de ${formatearMoneda(monto)} registrado en la cuota ${c.numero}.`,
-    );
+    setMensaje(`Abono de ${formatearMoneda(monto)} registrado en la cuota ${c.numero_cuota}.`);
     const cliente = c.prestamos?.clientes ?? null;
     setPagoRegistrado(
       cliente
@@ -382,9 +413,9 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
             nombres: `${cliente.nombres} ${cliente.apellidos}`,
             telefono: cliente.telefono,
             montoPagado: monto,
-            numeroCuota: c.numero,
-            saldoPendiente: saldo - monto,
-          }
+             numeroCuota: c.numero_cuota,
+             saldoPendiente: saldo - monto,
+           }
         : null,
     );
     setAbonoAbierto(null);
@@ -397,18 +428,60 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     if (!supabase) return;
     setExportando(true);
     setErrorGlobal(null);
-    const fecha = fechaHoy || aYMD(hoyLocal());
-    const { data, error } = await supabase
-      .from("pagos")
-      .select(SELECT_PAGOS_REPORTE)
-      .eq("fecha_pago", fecha);
-    setExportando(false);
-    if (error) {
-      setErrorGlobal(`No se pudo exportar el reporte: ${error.message}`);
-      return;
+    try {
+      const fechaISO = fechaHoy || aYMD(hoyLocal());
+      const clienteIds = [
+        ...new Set(
+          cobros
+            .map((c) => c.prestamos?.clientes?.id)
+            .filter((x): x is string => Boolean(x)),
+        ),
+      ];
+      const dnisPorCliente = new Map<string, string>();
+      if (clienteIds.length > 0) {
+        const { data } = await supabase
+          .from("clientes")
+          .select("id, dni")
+          .in("id", clienteIds);
+        if (data) {
+          for (const cli of data as unknown as { id: string; dni: string | null }[]) {
+            dnisPorCliente.set(cli.id, cli.dni ?? "");
+          }
+        }
+      }
+
+      const [y, m, d] = fechaISO.split("-").map(Number);
+      const fechaMostrar = new Date(y, m - 1, d).toLocaleDateString("es-PE");
+
+      const detalle = cobros.map((c) => {
+        const cliente = c.prestamos?.clientes ?? null;
+        const pagado = c.estado === "pagado";
+        return {
+          cliente: cliente ? nombreCompleto(cliente) : "Cliente eliminado",
+          dni: cliente ? (dnisPorCliente.get(cliente.id) ?? "") : "",
+          telefono: cliente?.telefono ?? "",
+          direccion: cliente?.direccion ?? "",
+          numeroCuota: String(c.numero_cuota),
+          montoCuota: Number(c.monto),
+          estado: pagado ? "PAGADO" : "PENDIENTE",
+          horaPago: pagado ? extraerHora(c.fecha_pago) : "",
+        };
+      });
+
+      exportarCobrosRutaCSV(
+        fechaMostrar,
+        fechaISO,
+        totalACobrar,
+        totalRecaudado,
+        cobros.length,
+        detalle,
+      );
+      setMensaje("Reporte CSV exportado correctamente.");
+    } catch {
+      setErrorGlobal("No se pudo exportar el reporte. Intenta nuevamente.");
+    } finally {
+      setExportando(false);
     }
-    exportarPagosCSV((data as unknown as PagoExportable[]) ?? [], fecha);
-    setMensaje("Reporte CSV exportado correctamente.");
   };
 
   return (
@@ -417,7 +490,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
         <div>
           <Link
             href="/"
-            className="mb-2 inline-flex items-center gap-1 text-sm text-zinc-500 transition hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-50"
+            className="mb-2 inline-flex items-center gap-1 text-sm text-slate-400 transition hover:text-slate-100 dark:text-slate-500 dark:hover:text-zinc-50"
           >
             <svg
               className="h-3.5 w-3.5"
@@ -433,16 +506,19 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
             </svg>
             Volver a clientes
           </Link>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl dark:text-zinc-50">
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-100 sm:text-3xl dark:text-zinc-50">
             Cobros del día
           </h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+          <p className="mt-1 text-sm text-slate-400 dark:text-slate-500">
             {fechaHoy
-              ? new Date(`${fechaHoy}T00:00:00`).toLocaleDateString("es-PE", {
-                  weekday: "long",
-                  day: "numeric",
-                  month: "long",
-                })
+              ? (() => {
+                  const [y, m, d] = fechaHoy.split("-").map(Number);
+                  return new Date(y, m - 1, d).toLocaleDateString("es-PE", {
+                    weekday: "long",
+                    day: "numeric",
+                    month: "long",
+                  });
+                })()
               : "Cargando fecha..."}
           </p>
         </div>
@@ -450,7 +526,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
           type="button"
           onClick={exportarReporte}
           disabled={exportando || cargando}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-zinc-300 px-4 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900/80 px-4 text-sm font-semibold text-slate-300 shadow-sm transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {exportando ? (
             <Spinner />
@@ -475,42 +551,35 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
       </header>
 
       {!supabase && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          Configura las variables{" "}
-          <code className="font-mono">NEXT_PUBLIC_SUPABASE_URL</code> y{" "}
-          <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> en{" "}
-          <code className="font-mono">.env.local</code>.
+        <div className="rounded-lg border border-amber-800 bg-amber-950/60 p-4 text-sm text-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          Configura las variables <code className="font-mono">NEXT_PUBLIC_SUPABASE_URL</code> y <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> en <code className="font-mono">.env.local</code>.
         </div>
       )}
 
       {errorGlobal && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
+        <div className="rounded-lg border border-red-800 bg-red-950/60 p-4 text-sm text-red-300 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
           {errorGlobal}
         </div>
       )}
 
       {mensaje && (
-        <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
+        <div className="rounded-lg border border-emerald-800 bg-emerald-950/60 p-4 text-sm text-emerald-300 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
           {mensaje}
         </div>
       )}
 
       {pagoRegistrado && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-300 bg-emerald-50 p-4 dark:border-emerald-800 dark:bg-emerald-950">
-          <div className="text-sm text-emerald-800 dark:text-emerald-200">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-800 bg-emerald-950/60 p-4">
+          <div className="text-sm text-emerald-300">
             <p className="font-semibold">
-              Pago registrado:{" "}
-              {formatearMoneda(pagoRegistrado.montoPagado)} · cuota #
-              {pagoRegistrado.numeroCuota}
+              Pago registrado: {formatearMoneda(pagoRegistrado.montoPagado)} · cuota #{pagoRegistrado.numeroCuota}
             </p>
             <p className="mt-0.5 text-xs">
-              {pagoRegistrado.nombres} · Saldo pendiente:{" "}
-              {formatearMoneda(pagoRegistrado.saldoPendiente)}
+              {pagoRegistrado.nombres} · Saldo pendiente: {formatearMoneda(pagoRegistrado.saldoPendiente)}
             </p>
             {!pagoRegistrado.telefono && (
-              <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-                El cliente no tiene teléfono registrado; no se puede generar el
-                comprobante.
+              <p className="mt-1 text-xs text-amber-300">
+                El cliente no tiene teléfono registrado; no se puede generar el comprobante.
               </p>
             )}
           </div>
@@ -533,7 +602,7 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
               type="button"
               onClick={() => setPagoRegistrado(null)}
               aria-label="Descartar comprobante"
-              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-300 text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-800 dark:text-emerald-300 dark:hover:bg-emerald-900"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-800 text-emerald-300 transition hover:bg-emerald-950/50"
             >
               <svg
                 className="h-4 w-4"
@@ -554,33 +623,32 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
 
       {/* Resumen del día */}
       <section className="grid grid-cols-2 gap-3">
-        <div className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-          <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm dark:border-zinc-800 dark:bg-slate-800">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">
             Por cobrar hoy
           </p>
-          <p className="mt-1 text-2xl font-bold text-zinc-900 dark:text-zinc-50">
+          <p className="mt-1 text-2xl font-bold text-emerald-400">
             {formatearMoneda(totalACobrar)}
           </p>
-          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+          <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
             {cobros.filter((c) => c.estado !== "pagado").length} cuota
-            {cobros.filter((c) => c.estado !== "pagado").length === 1 ? "" : "s"} por cobrar
-            hoy
+            {cobros.filter((c) => c.estado !== "pagado").length === 1 ? "" : "s"} por cobrar hoy
           </p>
         </div>
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 shadow-sm dark:border-emerald-900 dark:bg-emerald-950">
-          <p className="text-xs font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+        <div className="rounded-2xl border border-emerald-900/60 bg-emerald-950/50 p-4 shadow-sm">
+          <p className="text-xs font-medium uppercase tracking-wide text-emerald-400">
             Recaudado hoy
           </p>
-          <p className="mt-1 text-2xl font-bold text-emerald-700 dark:text-emerald-300">
+          <p className="mt-1 text-2xl font-bold text-emerald-400 dark:text-emerald-300">
             S/ {totalRecaudado.toFixed(2)}
           </p>
-          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-emerald-200/70 dark:bg-emerald-900">
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-emerald-900 dark:bg-emerald-900">
             <div
               className="h-full rounded-full bg-emerald-600 transition-all dark:bg-emerald-400"
               style={{ width: `${progresoHoy}%` }}
             />
           </div>
-          <p className="mt-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+          <p className="mt-1 text-xs font-medium text-emerald-400 dark:text-emerald-300">
             {cobros.filter((c) => c.estado === "pagado").length} cuota
             {cobros.filter((c) => c.estado === "pagado").length === 1 ? "" : "s"} cobrada
             {cobros.filter((c) => c.estado === "pagado").length === 1 ? "" : "s"} hoy
@@ -594,13 +662,13 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
           {[0, 1, 2].map((i) => (
             <div
               key={i}
-              className="h-44 animate-pulse rounded-2xl border border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900"
+              className="h-44 animate-pulse rounded-2xl border border-slate-800 bg-slate-800/60 dark:border-zinc-800 dark:bg-slate-800"
             />
           ))}
         </div>
       ) : cobros.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-zinc-300 p-10 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
-          No hay cuotas pendientes para hoy. ¡Ruta al día!
+        <div className="rounded-2xl border border-dashed border-slate-800 p-10 text-center text-sm text-slate-400 dark:border-zinc-700 dark:text-slate-500">
+          No hay cobros pendientes para hoy.
         </div>
       ) : (
         <ul className="flex flex-col gap-4">
@@ -616,22 +684,22 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
             return (
               <li
                 key={cliente.id}
-                className="rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900"
+                className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-slate-800"
               >
                 {/* Cabecera del cliente */}
                 <div className="flex items-start gap-3">
-                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-900 text-sm font-semibold text-white dark:bg-zinc-200 dark:text-zinc-900">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-800 text-sm font-semibold text-white dark:bg-slate-800 dark:text-slate-100">
                     {iniciales(cliente)}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                    <p className="truncate text-sm font-semibold text-slate-100 dark:text-zinc-50">
                       {nombreCompleto(cliente)}
                     </p>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-slate-400 dark:text-slate-500">
                       {cliente.telefono && (
                         <a
                           href={`tel:${cliente.telefono}`}
-                          className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400"
+                          className="inline-flex items-center gap-1 font-medium text-emerald-400 dark:text-emerald-400"
                         >
                           <svg
                             className="h-3 w-3"
@@ -668,28 +736,28 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                       )}
                     </div>
                     {cliente.referencia && (
-                      <p className="mt-0.5 truncate text-xs text-zinc-400 dark:text-zinc-500">
+                      <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
                         Ref: {cliente.referencia}
                       </p>
                     )}
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-1.5">
                     {totalHoy > 0 && (
-                      <span className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                      <span className="rounded-full bg-emerald-950/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-400 dark:bg-emerald-950 dark:text-emerald-300">
                         Cobrado hoy · S/ {totalHoy.toFixed(2)}
                       </span>
                     )}
                     {pendientes.length > 0 && (
-                      <span className="rounded-full bg-zinc-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                      <span className="rounded-full bg-slate-800/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-300 dark:bg-zinc-800 dark:text-zinc-300">
                         {pendientes.length} por cobrar
                       </span>
                     )}
                   </div>
                 </div>
 
-                {/* Cuotas cobradas (cobradas hoy) */}
+                {/* Cuotas pagadas */}
                 {pagadas.length > 0 && (
-                  <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 dark:border-emerald-800 dark:bg-emerald-950">
+                  <div className="mt-3 rounded-xl border border-emerald-800/50 bg-emerald-950/30 p-3.5">
                     <ul className="flex flex-col gap-1.5">
                       {pagadas.map((c) => {
                         const adelantada = c.fecha_vencimiento > fechaHoy;
@@ -698,28 +766,27 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                             key={c.id}
                             className="flex items-center justify-between gap-3"
                           >
-                            <span className="text-sm font-medium text-emerald-800 dark:text-emerald-200">
-                              ✓ Cuota {c.numero}/
-                              {c.prestamos?.numero_cuotas ?? "?"} · Cobrado el{" "}
+                            <span className="text-sm font-medium text-emerald-300">
+                               ✓ Cuota {c.numero_cuota}/{c.prestamos?.numero_cuotas ?? "?"} · Cobrado el{" "}
                               {formatearDiaMes(c.fecha_pago)}
                               {adelantada && (
-                                <span className="ml-1.5 rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700 dark:bg-sky-950 dark:text-sky-300">
+                                <span className="ml-1.5 rounded-full bg-sky-950 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
                                   Adelantado
                                 </span>
                               )}
                             </span>
-                            <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
+                            <span className="text-sm font-semibold text-emerald-400">
                               {formatearMoneda(Number(c.monto))}
                             </span>
                           </li>
                         );
                       })}
                     </ul>
-                    <div className="mt-2 flex items-center justify-between border-t border-emerald-200 pt-2 text-sm dark:border-emerald-800">
-                      <span className="font-medium text-emerald-800 dark:text-emerald-200">
+                    <div className="mt-2 flex items-center justify-between border-t border-emerald-800/50 pt-2 text-sm">
+                      <span className="font-medium text-emerald-300">
                         Total cobrado hoy
                       </span>
-                      <span className="text-base font-bold text-emerald-700 dark:text-emerald-300">
+                      <span className="text-base font-bold text-emerald-400">
                         S/ {totalHoy.toFixed(2)}
                       </span>
                     </div>
@@ -733,24 +800,25 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                   const montoPagadoCuota = monto - saldo;
                   const parcial = c.estado === "parcial";
                   const vencida = c.estado === "vencido" || c.fecha_vencimiento < fechaHoy;
-                  const pctCuota =
-                    monto > 0
-                      ? Math.min(100, Math.round((montoPagadoCuota / monto) * 100))
-                      : 0;
 
                   return (
                     <div
                       key={c.id}
                       className={`mt-3 rounded-xl border p-3.5 ${
                         parcial
-                          ? "border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950"
-                          : "border-zinc-200 bg-zinc-50/60 dark:border-zinc-800 dark:bg-zinc-800/60"
+                          ? "border-amber-900/60 bg-amber-950/40"
+                          : "border-slate-800 bg-slate-800/40"
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                          {`Cuota ${c.numero} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
+                        <p className="text-xs font-medium text-slate-400 dark:text-slate-500">
+                           {`Cuota ${c.numero_cuota} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
                           {formatearFechaDB(c.fecha_vencimiento)}
+                          {vencida && (
+                            <span className="ml-2 rounded-full bg-red-950/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">
+                              Vencida
+                            </span>
+                          )}
                         </p>
                         <div className="flex shrink-0 items-center gap-1.5">
                           {cliente.telefono && (
@@ -759,171 +827,89 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
                                 cliente.telefono,
                                 mensajeRecordatorio({
                                   nombres: nombreCompleto(cliente),
-                                  numeroCuota: c.numero,
-                                  monto,
-                                }),
+                                  montoCuota: monto,
+                                  saldoPendiente: saldo,
+                                   numeroCuota: c.numero_cuota,
+                                   fechaVencimiento: formatearFechaDB(c.fecha_vencimiento),
+                                 }),
                               )}
                               target="_blank"
                               rel="noopener noreferrer"
-                              aria-label="Enviar recordatorio por WhatsApp"
-                              title="Enviar recordatorio por WhatsApp"
-                              className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-white transition hover:bg-emerald-700"
+                              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 text-xs font-medium text-slate-200 transition hover:bg-slate-700"
+                              title="Enviar recordatorio WhatsApp"
                             >
-                              <WhatsAppIcon className="h-3.5 w-3.5" />
+                              <WhatsAppIcon className="h-3.5 w-3.5 text-emerald-500" />
+                              <span className="hidden sm:inline">Recordatorio</span>
                             </a>
                           )}
-                          <span
-                            className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
-                              vencida
-                                ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
-                                : parcial
-                                  ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
-                                  : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
-                            }`}
+                        </div>
+                      </div>
+
+                      <div className="mt-2 flex items-baseline justify-between gap-2">
+                        <div>
+                          <p className="text-xl font-bold text-slate-100">
+                            {formatearMoneda(saldo)}
+                          </p>
+                          {parcial && (
+                            <p className="text-xs text-amber-400">
+                              Abonado: {formatearMoneda(montoPagadoCuota)} de {formatearMoneda(monto)}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => abrirAbono(c)}
+                            disabled={enviandoId === c.id}
+                            className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs font-medium text-slate-200 transition hover:bg-slate-700 disabled:opacity-50"
                           >
-                            {vencida ? "Vencida" : parcial ? "Parcial" : "Hoy"}
-                          </span>
+                            Abonar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => pagarCuota(c)}
+                            disabled={enviandoId === c.id}
+                            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+                          >
+                            {enviandoId === c.id ? <Spinner /> : "Pagar Cuota"}
+                          </button>
                         </div>
                       </div>
 
-                      <div className="mt-2 flex items-center justify-between">
-                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                          {parcial ? "Saldo pendiente" : "Saldo a cobrar"}
-                        </p>
-                        <p
-                          className={`text-base font-bold ${
-                            parcial
-                              ? "text-amber-600 dark:text-amber-400"
-                              : "text-zinc-900 dark:text-zinc-50"
-                          }`}
-                        >
-                          {formatearMoneda(saldo)}
-                        </p>
-                      </div>
-
-                      {parcial && (
-                        <div className="mt-2">
-                          <div className="mb-1 flex justify-between text-[11px] text-zinc-500 dark:text-zinc-400">
-                            <span>
-                              Pagado {formatearMoneda(montoPagadoCuota)} de{" "}
-                              {formatearMoneda(monto)}
-                            </span>
-                            <span>{pctCuota}%</span>
-                          </div>
-                          <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
-                            <div
-                              className="h-full rounded-full bg-amber-500"
-                              style={{ width: `${pctCuota}%` }}
-                            />
-                          </div>
-                        </div>
-                      )}
-
+                      {/* Modal/Desplegable de Abono */}
                       {abonoAbierto === c.id && (
-                        <form
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            registrarAbono(c);
-                          }}
-                          className="mt-3 flex flex-col gap-2 rounded-xl border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900"
-                        >
-                          <label
-                            htmlFor={`abono-${c.id}`}
-                            className="text-xs font-medium text-zinc-600 dark:text-zinc-300"
-                          >
-                            Monto del abono (menor a {formatearMoneda(saldo)})
+                        <div className="mt-3 border-t border-slate-800 pt-3">
+                          <label className="block text-xs font-medium text-slate-300">
+                            Monto a abonar
                           </label>
-                          <div className="flex gap-2">
+                          <div className="mt-1 flex items-center gap-2">
                             <input
-                              id={`abono-${c.id}`}
                               type="number"
-                              min={0}
                               step="0.01"
-                              inputMode="decimal"
-                              autoFocus
-                              placeholder="0.00"
-                              className={inputCls}
+                              placeholder={`Máx S/ ${saldo.toFixed(2)}`}
                               value={abonos[c.id] ?? ""}
-                              onChange={(e) => {
+                              onChange={(e) =>
                                 setAbonos((prev) => ({
                                   ...prev,
                                   [c.id]: e.target.value,
-                                }));
-                                setErrorAbono(null);
-                              }}
-                              disabled={enviandoId === c.id}
+                                }))
+                              }
+                              className={inputCls}
                             />
                             <button
-                              type="submit"
-                              disabled={enviandoId === c.id}
-                              className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-amber-500 px-4 text-sm font-semibold text-white transition hover:bg-amber-600 disabled:opacity-60"
-                            >
-                              {enviandoId === c.id ? <Spinner /> : "Registrar"}
-                            </button>
-                            <button
                               type="button"
-                              onClick={() => {
-                                setAbonoAbierto(null);
-                                setErrorAbono(null);
-                              }}
+                              onClick={() => registrarAbono(c)}
                               disabled={enviandoId === c.id}
-                              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-zinc-300 text-zinc-500 transition hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:hover:bg-zinc-800"
-                              aria-label="Cancelar abono"
+                              className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
                             >
-                              <svg
-                                className="h-4 w-4"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                aria-hidden="true"
-                              >
-                                <path d="M18 6 6 18M6 6l12 12" />
-                              </svg>
+                              {enviandoId === c.id ? <Spinner /> : "Confirmar"}
                             </button>
                           </div>
                           {errorAbono && (
-                            <p className="text-xs text-red-600 dark:text-red-400">
-                              {errorAbono}
-                            </p>
+                            <p className="mt-1 text-xs text-red-400">{errorAbono}</p>
                           )}
-                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                            El pago total se registra con &quot;Pagar cuota&quot;.
-                          </p>
-                        </form>
+                        </div>
                       )}
-
-                      <div className="mt-3 grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={
-                            abonoAbierto === c.id
-                              ? () => setAbonoAbierto(null)
-                              : () => abrirAbono(c)
-                          }
-                          disabled={enviandoId === c.id}
-                          className="inline-flex h-10 items-center justify-center rounded-lg border border-zinc-300 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                        >
-                          {abonoAbierto === c.id ? "Cancelar" : "Abono parcial"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => pagarCuota(c)}
-                          disabled={enviandoId === c.id}
-                          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-zinc-900 text-sm font-semibold text-white transition hover:bg-zinc-700 disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-                        >
-                          {enviandoId === c.id ? (
-                            <>
-                              <Spinner />
-                              Procesando...
-                            </>
-                          ) : (
-                            "Pagar cuota"
-                          )}
-                        </button>
-                      </div>
                     </div>
                   );
                 })}
@@ -933,30 +919,5 @@ const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
         </ul>
       )}
     </main>
-  );
-}
-
-function Spinner() {
-  return (
-    <svg
-      className="h-4 w-4 animate-spin"
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-    >
-      <circle
-        className="opacity-25"
-        cx="12"
-        cy="12"
-        r="10"
-        stroke="currentColor"
-        strokeWidth="4"
-      />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-      />
-    </svg>
   );
 }

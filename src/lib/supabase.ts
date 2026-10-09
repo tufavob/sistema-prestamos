@@ -10,6 +10,11 @@ export type Cliente = {
   telefono: string | null;
   direccion: string | null;
   referencia: string | null;
+  vivienda: string | null;
+  deudas_financieras: string | null;
+  foto_dni_frontal: string | null;
+  foto_dni_posterior: string | null;
+  foto_fachada: string | null;
 };
 
 export type ClienteInsert = {
