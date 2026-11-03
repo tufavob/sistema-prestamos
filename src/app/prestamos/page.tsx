@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { formatearMoneda, FRECUENCIAS, type Frecuencia } from "@/lib/prestamos";
+import { recalcularCalificaciones } from "@/lib/clientes";
 import BadgeCalificacion from "@/components/BadgeCalificacion";
 
 const supabase = hasAuthConfig ? createClient() : null;
@@ -61,6 +62,7 @@ const esFinalizado = (p: Prestamo): boolean => {
   return (
     est === "finalizado" ||
     est === "liquidado" ||
+    est === "completado" ||
     est === "cancelado" ||
     Number(p.saldo_pendiente) <= 0
   );
@@ -103,6 +105,8 @@ export default function Prestamos() {
 
   const obtenerPrestamos = useCallback(async (): Promise<ResultadoPrestamos | null> => {
     if (!supabase) return null;
+    // Refresca la calificación de los clientes antes de listar los préstamos.
+    await recalcularCalificaciones(supabase);
     const { data, error } = await supabase
       .from("prestamos")
       .select(
@@ -117,7 +121,7 @@ export default function Prestamos() {
       return {
         ...p,
         saldo_pendiente: saldo,
-        estado: saldo <= 0 ? "finalizado" : p.estado,
+        estado: saldo <= 0 ? "completado" : p.estado,
         cuotas: undefined,
       };
     });
@@ -320,7 +324,7 @@ className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-grad
                               : "border border-amber-500/30 bg-amber-500/10 text-amber-400"
                           }`}
                         >
-                           {String(finalizado ? "finalizado" : (p.estado || "activo")).toLowerCase()}
+                           {String(finalizado ? "completado" : (p.estado || "activo")).toLowerCase()}
                          </span>
                       </td>
                       <td className="px-5 py-3.5 text-right">

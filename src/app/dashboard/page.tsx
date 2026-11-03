@@ -403,7 +403,7 @@ export default function Dashboard() {
         const saldo = saldoDe(p);
         const finalizado =
           saldo <= 0 ||
-          ["finalizado", "liquidado", "cancelado"].includes(
+          ["finalizado", "liquidado", "completado", "cancelado"].includes(
             String(p.estado ?? "").toLowerCase(),
           );
         const calificacion = p.cliente_id

@@ -58,11 +58,20 @@ const formatearDiaMes = (iso: string | null | undefined) => {
 
 const fechaPagoEsHoy = (c: Cobro) => {
   if (!c.fecha_pago) return true;
+  const zonaPeru = { timeZone: "America/Lima" } as const;
   return (
-    new Date(c.fecha_pago).toLocaleDateString("sv-SE") ===
-    new Date().toLocaleDateString("sv-SE")
+    new Date(c.fecha_pago).toLocaleDateString("sv-SE", zonaPeru) ===
+    new Date().toLocaleDateString("sv-SE", zonaPeru)
   );
 };
+
+/** Fecha YYYY-MM-DD de un campo `date` de Supabase (evita desfases de zona). */
+const fechaYMD = (iso: string | null | undefined): string =>
+  String(iso ?? "").slice(0, 10);
+
+/** Fecha de hoy en Perú, independiente de la zona del navegador. */
+const hoyPeruYMD = (): string =>
+  new Date().toLocaleDateString("sv-SE", { timeZone: "America/Lima" });
 
 const inputCls =
   "w-full rounded-lg border border-slate-800 bg-slate-950/70 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20";
@@ -156,14 +165,6 @@ type RawCobroPagada = RawCobro & {
   updated_at?: string | null;
 };
 
-const esPrestamoActivoConSaldo = (raw: RawCobro | RawCobroPagada): boolean => {
-  const p = Array.isArray(raw.prestamos) ? raw.prestamos[0] : raw.prestamos;
-  if (!p) return false;
-  const estado = String(p.estado ?? "").toLowerCase();
-  const saldo = Number(p.saldo_pendiente ?? 0);
-  return estado === "activo" && saldo > 0;
-};
-
 const normalizarCobros = (raw: RawCobro[]): Cobro[] =>
   raw.map((r) => {
     const p = Array.isArray(r.prestamos) ? r.prestamos[0] : r.prestamos;
@@ -188,6 +189,7 @@ export default function Cobros() {
   const [cobros, setCobros] = useState<Cobro[]>([]);
   const [totalACobrar, setTotalACobrar] = useState(0);
   const [totalRecaudado, setTotalRecaudado] = useState(0);
+  const [totalCobros, setTotalCobros] = useState(0);
   const [fechaHoy, setFechaHoy] = useState("");
 
   const [cargando, setCargando] = useState(true);
@@ -198,6 +200,10 @@ export default function Cobros() {
   const [abonoAbierto, setAbonoAbierto] = useState<string | null>(null);
   const [abonos, setAbonos] = useState<Record<string, string>>({});
   const [errorAbono, setErrorAbono] = useState<string | null>(null);
+  // Cuotas vencidas plegadas por defecto, agrupadas por cliente.
+  const [vencidasAbiertas, setVencidasAbiertas] = useState<
+    Record<string, boolean>
+  >({});
   const [pagoRegistrado, setPagoRegistrado] = useState<PagoRegistrado | null>(null);
   const [exportando, setExportando] = useState(false);
 
@@ -206,25 +212,26 @@ export default function Cobros() {
     cobros: Cobro[];
     totalACobrar: number;
     totalRecaudado: number;
+    totalCobros: number;
     hoy: string;
   };
 
   const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     if (!supabase) return null;
     const hoy = aYMD(hoyLocal());
-    const hoySVE = new Date().toLocaleDateString("sv-SE");
+    const hoyPeru = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Lima" });
 
+    // Toda cuota con saldo pendiente cuyo vencimiento ya llegó (o pasó) debe
+    // aparecer en la ruta del día, sin importar el estado del préstamo.
     const seleccionCuotas =
-      "*, prestamos!inner(numero_cuotas, estado, saldo_pendiente, clientes!inner(id, nombres, apellidos, dni, telefono, direccion, referencia))";
+      "*, prestamos!inner(*, clientes!inner(*))";
 
     const [respPendientes, respPagadas] = await Promise.all([
       supabase
         .from("cuotas")
         .select(seleccionCuotas)
-        .lte("fecha_vencimiento", hoy)
-        .in("estado", ["pendiente", "parcial", "vencido"])
-        .eq("prestamos.estado", "activo")
-        .gt("prestamos.saldo_pendiente", 0)
+        .gt("saldo_pendiente", 0)
+        .lte("fecha_vencimiento", hoyPeru)
         .order("fecha_vencimiento", { ascending: true }),
       supabase.from("cuotas").select(seleccionCuotas).eq("estado", "pagado"),
     ]);
@@ -235,6 +242,7 @@ export default function Cobros() {
         cobros: [],
         totalACobrar: 0,
         totalRecaudado: 0,
+        totalCobros: 0,
         hoy,
       };
     }
@@ -242,21 +250,87 @@ export default function Cobros() {
     const cuotasPendientes = normalizarCobros((respPendientes.data as unknown as RawCobro[]) ?? []);
 
     let recaudadoHoy = 0;
+    let totalCobros = 0;
     const pagadasHoy: RawCobroPagada[] = [];
-    if (respPagadas.error) {
-      for (const c of cuotasPendientes) {
-        if (c.estado === "pagado") recaudadoHoy += Number(c.monto);
+
+    // Caja real del día en zona horaria Perú. `pagos.fecha_pago` es de tipo
+    // DATE en la base actual, por lo que el rango ISO con offset -05:00 se
+    // aplica sobre `created_at` (timestamptz) y se complementa con la fecha
+    // de pago del día para no perder registros históricos/importados.
+    const inicioDia = `${hoyPeru}T00:00:00-05:00`;
+    const finDia = `${hoyPeru}T23:59:59-05:00`;
+    const montosPorPago = new Map<string, number>();
+    const acumularPagos = (
+      filas: { id: string; monto: number | string | null }[] | null | undefined,
+    ) => {
+      for (const fila of filas ?? []) {
+        montosPorPago.set(fila.id, Number(fila.monto ?? 0));
       }
-    } else {
+    };
+
+    try {
+      const [respPorCreacion, respPorFecha, respPorRango] = await Promise.all([
+        supabase
+          .from("pagos")
+          .select("id, monto")
+          .gte("created_at", inicioDia)
+          .lte("created_at", finDia),
+        supabase.from("pagos").select("id, monto").eq("fecha_pago", hoyPeru),
+        supabase
+          .from("pagos")
+          .select("id, monto")
+          .gte("fecha_pago", inicioDia)
+          .lte("fecha_pago", finDia),
+      ]);
+
+      if (!respPorCreacion.error) {
+        acumularPagos(
+          respPorCreacion.data as { id: string; monto: number | null }[] | null,
+        );
+      }
+      if (!respPorFecha.error) {
+        acumularPagos(
+          respPorFecha.data as { id: string; monto: number | null }[] | null,
+        );
+      }
+      if (!respPorRango.error) {
+        acumularPagos(
+          respPorRango.data as { id: string; monto: number | null }[] | null,
+        );
+      }
+    } catch {
+      // La consulta a `pagos` no está disponible: se usa el respaldo local.
+    }
+
+    if (montosPorPago.size > 0) {
+      recaudadoHoy = [...montosPorPago.values()].reduce((s, m) => s + m, 0);
+      totalCobros = montosPorPago.size;
+    } else if (!respPagadas.error) {
+      // Respaldo: cuotas marcadas como pagadas hoy.
       for (const raw of (respPagadas.data as unknown as RawCobroPagada[]) ?? []) {
-        const fechaPago = raw.updated_at ?? raw.fecha_pago ?? null;
+        const fechaPago = raw.fecha_pago ?? raw.updated_at ?? null;
         const esHoy = fechaPago
-          ? new Date(fechaPago).toLocaleDateString("sv-SE") === hoySVE
-          : true;
+          ? new Date(fechaPago).toLocaleDateString("sv-SE", {
+              timeZone: "America/Lima",
+            }) === hoyPeru
+          : false;
         if (esHoy) {
           recaudadoHoy += Number(raw.monto_pagado ?? raw.monto ?? 0);
-          if (esPrestamoActivoConSaldo(raw)) pagadasHoy.push(raw);
+          totalCobros += 1;
         }
+      }
+    }
+
+    // Cuotas cobradas hoy (para mostrarlas en el grupo del cliente).
+    if (!respPagadas.error) {
+      for (const raw of (respPagadas.data as unknown as RawCobroPagada[]) ?? []) {
+        const fechaPago = raw.fecha_pago ?? raw.updated_at ?? null;
+        const esHoy = fechaPago
+          ? new Date(fechaPago).toLocaleDateString("sv-SE", {
+              timeZone: "America/Lima",
+            }) === hoyPeru
+          : false;
+        if (esHoy) pagadasHoy.push(raw);
       }
     }
 
@@ -276,6 +350,7 @@ export default function Cobros() {
         0,
       ),
       totalRecaudado: recaudadoHoy,
+      totalCobros,
       hoy,
     };
   }, []);
@@ -291,6 +366,7 @@ export default function Cobros() {
     setCobros(res.cobros);
     setTotalACobrar(res.totalACobrar);
     setTotalRecaudado(res.totalRecaudado);
+    setTotalCobros(res.totalCobros);
     setFechaHoy(res.hoy);
     setErrorGlobal(null);
     setCargando(false);
@@ -307,6 +383,7 @@ export default function Cobros() {
         setCobros(res.cobros);
         setTotalACobrar(res.totalACobrar);
         setTotalRecaudado(res.totalRecaudado);
+        setTotalCobros(res.totalCobros);
         setFechaHoy(res.hoy);
       }
       if (activo) setCargando(false);
@@ -422,6 +499,129 @@ export default function Cobros() {
     setAbonos((prev) => ({ ...prev, [c.id]: "" }));
     router.refresh();
     await refrescar();
+  };
+
+  /** Tarjeta de una cuota pendiente con sus controles de pago. */
+  const renderCuotaPendiente = (c: Cobro, cliente: ClienteCobro) => {
+    const saldo = Number(c.saldo_pendiente);
+    const monto = Number(c.monto);
+    const montoPagadoCuota = monto - saldo;
+    const parcial = c.estado === "parcial";
+    const vencida =
+      c.estado === "vencido" || fechaYMD(c.fecha_vencimiento) < hoyPeruYMD();
+
+    return (
+      <div
+        key={c.id}
+        className={`mt-3 rounded-xl border p-3.5 ${
+          parcial
+            ? "border-amber-900/60 bg-amber-950/40"
+            : "border-slate-800 bg-slate-800/40"
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-medium text-slate-400 dark:text-slate-500">
+            {`Cuota ${c.numero_cuota} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
+            {formatearFechaDB(c.fecha_vencimiento)}
+            {vencida && (
+              <span className="ml-2 rounded-full bg-red-950/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">
+                Vencida
+              </span>
+            )}
+          </p>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {cliente.telefono && (
+              <a
+                href={crearLinkWhatsApp(
+                  cliente.telefono,
+                  mensajeRecordatorio({
+                    nombres: nombreCompleto(cliente),
+                    montoCuota: monto,
+                    saldoPendiente: saldo,
+                    numeroCuota: c.numero_cuota,
+                    fechaVencimiento: formatearFechaDB(c.fecha_vencimiento),
+                  }),
+                )}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 text-xs font-medium text-slate-200 transition hover:bg-slate-700"
+                title="Enviar recordatorio WhatsApp"
+              >
+                <WhatsAppIcon className="h-3.5 w-3.5 text-emerald-500" />
+                <span className="hidden sm:inline">Recordatorio</span>
+              </a>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-2 flex items-baseline justify-between gap-2">
+          <div>
+            <p className="text-xl font-bold text-slate-100">
+              {formatearMoneda(saldo)}
+            </p>
+            {parcial && (
+              <p className="text-xs text-amber-400">
+                Abonado: {formatearMoneda(montoPagadoCuota)} de{" "}
+                {formatearMoneda(monto)}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => abrirAbono(c)}
+              disabled={enviandoId === c.id}
+              className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs font-medium text-slate-200 transition hover:bg-slate-700 disabled:opacity-50"
+            >
+              Abonar
+            </button>
+            <button
+              type="button"
+              onClick={() => pagarCuota(c)}
+              disabled={enviandoId === c.id}
+              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+            >
+              {enviandoId === c.id ? <Spinner /> : "Pagar Cuota"}
+            </button>
+          </div>
+        </div>
+
+        {/* Modal/Desplegable de Abono */}
+        {abonoAbierto === c.id && (
+          <div className="mt-3 border-t border-slate-800 pt-3">
+            <label className="block text-xs font-medium text-slate-300">
+              Monto a abonar
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <input
+                type="number"
+                step="0.01"
+                placeholder={`Máx S/ ${saldo.toFixed(2)}`}
+                value={abonos[c.id] ?? ""}
+                onChange={(e) =>
+                  setAbonos((prev) => ({
+                    ...prev,
+                    [c.id]: e.target.value,
+                  }))
+                }
+                className={inputCls}
+              />
+              <button
+                type="button"
+                onClick={() => registrarAbono(c)}
+                disabled={enviandoId === c.id}
+                className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
+              >
+                {enviandoId === c.id ? <Spinner /> : "Confirmar"}
+              </button>
+            </div>
+            {errorAbono && (
+              <p className="mt-1 text-xs text-red-400">{errorAbono}</p>
+            )}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const exportarReporte = async () => {
@@ -649,9 +849,7 @@ export default function Cobros() {
             />
           </div>
           <p className="mt-1 text-xs font-medium text-emerald-400 dark:text-emerald-300">
-            {cobros.filter((c) => c.estado === "pagado").length} cuota
-            {cobros.filter((c) => c.estado === "pagado").length === 1 ? "" : "s"} cobrada
-            {cobros.filter((c) => c.estado === "pagado").length === 1 ? "" : "s"} hoy
+            {totalCobros} {totalCobros === 1 ? "cobro realizado" : "cobros realizados"} hoy
           </p>
         </div>
       </section>
@@ -680,6 +878,18 @@ export default function Cobros() {
               (s, c) => (fechaPagoEsHoy(c) ? s + Number(c.monto) : s),
               0,
             );
+            const hoyReferencia = fechaHoy || hoyPeruYMD();
+            const vencidas = pendientes.filter(
+              (c) => fechaYMD(c.fecha_vencimiento) < hoyReferencia,
+            );
+            const deHoy = pendientes.filter(
+              (c) => fechaYMD(c.fecha_vencimiento) >= hoyReferencia,
+            );
+            const totalVencidas = vencidas.reduce(
+              (s, c) => s + Number(c.saldo_pendiente ?? 0),
+              0,
+            );
+            const abierta = Boolean(vencidasAbiertas[cliente.id]);
 
             return (
               <li
@@ -793,126 +1003,61 @@ export default function Cobros() {
                   </div>
                 )}
 
-                {/* Cuotas por cobrar */}
-                {pendientes.map((c) => {
-                  const saldo = Number(c.saldo_pendiente);
-                  const monto = Number(c.monto);
-                  const montoPagadoCuota = monto - saldo;
-                  const parcial = c.estado === "parcial";
-                  const vencida = c.estado === "vencido" || c.fecha_vencimiento < fechaHoy;
+                {/* Cuotas que vencen HOY: siempre visibles (prioridad de cobro) */}
+                {deHoy.map((c) => renderCuotaPendiente(c, cliente))}
 
-                  return (
-                    <div
-                      key={c.id}
-                      className={`mt-3 rounded-xl border p-3.5 ${
-                        parcial
-                          ? "border-amber-900/60 bg-amber-950/40"
-                          : "border-slate-800 bg-slate-800/40"
-                      }`}
+                {/* Cuotas vencidas (anteriores a hoy): plegadas por defecto */}
+                {vencidas.length > 0 && (
+                  <div className="mt-3 overflow-hidden rounded-xl border border-red-900/50 bg-red-950/20">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVencidasAbiertas((prev) => ({
+                          ...prev,
+                          [cliente.id]: !prev[cliente.id],
+                        }))
+                      }
+                      aria-expanded={abierta}
+                      aria-controls={`cuotas-vencidas-${cliente.id}`}
+                      className="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left transition hover:bg-red-950/30"
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-xs font-medium text-slate-400 dark:text-slate-500">
-                           {`Cuota ${c.numero_cuota} de ${c.prestamos?.numero_cuotas ?? "?"}`} ·{" "}
-                          {formatearFechaDB(c.fecha_vencimiento)}
-                          {vencida && (
-                            <span className="ml-2 rounded-full bg-red-950/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">
-                              Vencida
-                            </span>
-                          )}
-                        </p>
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          {cliente.telefono && (
-                            <a
-                              href={crearLinkWhatsApp(
-                                cliente.telefono,
-                                mensajeRecordatorio({
-                                  nombres: nombreCompleto(cliente),
-                                  montoCuota: monto,
-                                  saldoPendiente: saldo,
-                                   numeroCuota: c.numero_cuota,
-                                   fechaVencimiento: formatearFechaDB(c.fecha_vencimiento),
-                                 }),
-                              )}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-2.5 text-xs font-medium text-slate-200 transition hover:bg-slate-700"
-                              title="Enviar recordatorio WhatsApp"
-                            >
-                              <WhatsAppIcon className="h-3.5 w-3.5 text-emerald-500" />
-                              <span className="hidden sm:inline">Recordatorio</span>
-                            </a>
-                          )}
-                        </div>
+                      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-semibold text-red-300">
+                        <span>
+                          ⚠️ {vencidas.length}{" "}
+                          {vencidas.length === 1
+                            ? "Cuota Vencida"
+                            : "Cuotas Vencidas"}
+                        </span>
+                        <span className="text-red-500/70">·</span>
+                        <span className="text-red-200">
+                          Total: {formatearMoneda(totalVencidas)}
+                        </span>
+                      </span>
+                      <svg
+                        className={`h-4 w-4 shrink-0 text-red-300 transition-transform ${
+                          abierta ? "rotate-180" : ""
+                        }`}
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="m6 9 6 6 6-6" />
+                      </svg>
+                    </button>
+                    {abierta && (
+                      <div
+                        id={`cuotas-vencidas-${cliente.id}`}
+                        className="border-t border-red-900/40 px-1.5 pb-1.5"
+                      >
+                        {vencidas.map((c) => renderCuotaPendiente(c, cliente))}
                       </div>
-
-                      <div className="mt-2 flex items-baseline justify-between gap-2">
-                        <div>
-                          <p className="text-xl font-bold text-slate-100">
-                            {formatearMoneda(saldo)}
-                          </p>
-                          {parcial && (
-                            <p className="text-xs text-amber-400">
-                              Abonado: {formatearMoneda(montoPagadoCuota)} de {formatearMoneda(monto)}
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => abrirAbono(c)}
-                            disabled={enviandoId === c.id}
-                            className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-3 text-xs font-medium text-slate-200 transition hover:bg-slate-700 disabled:opacity-50"
-                          >
-                            Abonar
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => pagarCuota(c)}
-                            disabled={enviandoId === c.id}
-                            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
-                          >
-                            {enviandoId === c.id ? <Spinner /> : "Pagar Cuota"}
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Modal/Desplegable de Abono */}
-                      {abonoAbierto === c.id && (
-                        <div className="mt-3 border-t border-slate-800 pt-3">
-                          <label className="block text-xs font-medium text-slate-300">
-                            Monto a abonar
-                          </label>
-                          <div className="mt-1 flex items-center gap-2">
-                            <input
-                              type="number"
-                              step="0.01"
-                              placeholder={`Máx S/ ${saldo.toFixed(2)}`}
-                              value={abonos[c.id] ?? ""}
-                              onChange={(e) =>
-                                setAbonos((prev) => ({
-                                  ...prev,
-                                  [c.id]: e.target.value,
-                                }))
-                              }
-                              className={inputCls}
-                            />
-                            <button
-                              type="button"
-                              onClick={() => registrarAbono(c)}
-                              disabled={enviandoId === c.id}
-                              className="inline-flex h-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-50"
-                            >
-                              {enviandoId === c.id ? <Spinner /> : "Confirmar"}
-                            </button>
-                          </div>
-                          {errorAbono && (
-                            <p className="mt-1 text-xs text-red-400">{errorAbono}</p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                    )}
+                  </div>
+                )}
               </li>
             );
           })}

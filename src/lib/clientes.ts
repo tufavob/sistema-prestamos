@@ -37,6 +37,22 @@ const primero = <T,>(x: T | T[] | null | undefined): T | null =>
 
 const redondear = (n: number) => Math.round(n * 100) / 100;
 
+/**
+ * Recalcula y persiste la calificación de todos los clientes en Supabase.
+ * Se apoya en la función SQL `recalcular_calificaciones()` (migración
+ * 20240101000013). Si aún no está desplegada, no bloquea la carga.
+ */
+export async function recalcularCalificaciones(
+  supabase: SupabaseClient,
+): Promise<void> {
+  const { error } = await supabase.rpc("recalcular_calificaciones");
+  if (error) {
+    console.warn(
+      `No se pudieron recalcular las calificaciones: ${error.message}`,
+    );
+  }
+}
+
 export async function obtenerResumenCliente(
   supabase: SupabaseClient,
   clienteId: string,

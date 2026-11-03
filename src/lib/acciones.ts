@@ -71,7 +71,7 @@ export async function registrarCobro(input: {
   const { data: cuota, error: errorLectura } = await supabase
     .from("cuotas")
     .select(
-      "prestamo_id, monto, monto_pagado, saldo_pendiente, prestamos(saldo_pendiente)",
+      "prestamo_id, monto, monto_pagado, saldo_pendiente, estado, fecha_pago, prestamos(saldo_pendiente)",
     )
     .eq("id", input.cuotaId)
     .maybeSingle();
@@ -92,7 +92,14 @@ export async function registrarCobro(input: {
   const saldoCuota = Math.max(0, redondear(montoCuota - nuevoPagado));
   const estadoFinal = nuevoPagado >= montoCuota ? "pagado" : "parcial";
 
-  // 2) Actualizar la cuota (pago total -> 'pagado'; abono parcial -> 'parcial').
+  // Datos previos de la cuota (para poder revertir si algo falla después).
+  const saldoAnterior = Number(
+    cuota.saldo_pendiente ?? Math.max(0, redondear(montoCuota - yaPagado)),
+  );
+  const estadoAnterior = String(cuota.estado ?? "pendiente");
+  const fechaPagoAnterior =
+    (cuota.fecha_pago as string | null | undefined) ?? null;
+
   const medioPago =
     input.medioPago === "yape" ||
     input.medioPago === "plin" ||
@@ -100,13 +107,113 @@ export async function registrarCobro(input: {
       ? input.medioPago
       : "efectivo";
 
+  // 2) Registrar PRIMERO el ingreso en `pagos`. La tabla solo acepta
+  //    id, cuota_id, monto, metodo_pago y fecha_pago; NO se envía
+  //    prestamo_id ni cliente_id. Se prueban variantes por compatibilidad
+  //    entre entornos (metodo_pago/medio_pago y fecha_pago date/timestamptz).
+  const fechaPagoISO = new Date().toISOString();
+  const fechaPagoPeru = hoyEnLima();
+  const montoPago = redondear(input.monto);
+  const medioPagoEtiqueta =
+    medioPago.charAt(0).toUpperCase() + medioPago.slice(1);
+  const pagoId = crypto.randomUUID();
+
+  const variantesPago: Record<string, string | number>[] = [
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      metodo_pago: medioPago,
+      fecha_pago: fechaPagoISO,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      medio_pago: medioPago,
+      fecha_pago: fechaPagoISO,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      metodo_pago: medioPago,
+      fecha_pago: fechaPagoPeru,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      medio_pago: medioPago,
+      fecha_pago: fechaPagoPeru,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      metodo_pago: medioPagoEtiqueta,
+      fecha_pago: fechaPagoISO,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      metodo_pago: medioPagoEtiqueta,
+      fecha_pago: fechaPagoPeru,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      fecha_pago: fechaPagoISO,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+      fecha_pago: fechaPagoPeru,
+    },
+    {
+      id: pagoId,
+      cuota_id: input.cuotaId,
+      monto: montoPago,
+    },
+  ];
+
+  let errorPago: { message: string } | null = null;
+  for (const payload of variantesPago) {
+    const { error } = await supabase.from("pagos").insert(payload);
+    if (!error) {
+      errorPago = null;
+      break;
+    }
+    errorPago = error;
+    // Solo se reintenta cuando el error es de esquema/fecha/valor admitido;
+    // otro tipo de error (permisos, FK, etc.) no mejora cambiando columnas.
+    if (
+      !/column|schema cache|does not exist|invalid input syntax|date\/time|check constraint|invalid input value for enum/i.test(
+        error.message,
+      )
+    ) {
+      break;
+    }
+  }
+
+  if (errorPago) {
+    return {
+      ok: false,
+      error: `No se pudo registrar el pago en "pagos": ${traducirError(errorPago.message)}`,
+    };
+  }
+
+  // 3) Solo con el pago registrado, actualizar la cuota.
   const actualizacion: Record<string, string | number> = {
     estado: estadoFinal,
     monto_pagado: nuevoPagado,
     saldo_pendiente: saldoCuota,
   };
   if (estadoFinal === "pagado") {
-    actualizacion.fecha_pago = input.fecha;
+    actualizacion.fecha_pago = new Date().toISOString();
   }
 
   let { error: errorCuota } = await supabase
@@ -125,14 +232,30 @@ export async function registrarCobro(input: {
   }
 
   if (errorCuota) {
+    // Revertir el pago para no dejar un ingreso sin cuota actualizada.
+    const { data: revertidos, error: errorReversion } = await supabase
+      .from("pagos")
+      .delete()
+      .eq("id", pagoId)
+      .select("id");
+    if (errorReversion || !revertidos || revertidos.length === 0) {
+      console.error(
+        "No se pudo revertir el pago tras fallar la cuota (posible falta de política DELETE en pagos):",
+        errorReversion?.message ?? "0 filas eliminadas",
+      );
+    }
     return {
       ok: false,
       error: `No se pudo actualizar la cuota: ${traducirError(errorCuota.message)}`,
     };
   }
 
-  // 3) Descontar el saldo del préstamo (mismo efecto que el antiguo RPC).
-  //    Cuando llega a 0, el préstamo pasa automáticamente a estado FINALIZADO.
+  // 4) Descontar el saldo del préstamo y recalcular su estado según las
+  //    cuotas reales. El estado NO se infiere del saldo: mientras exista
+  //    alguna cuota con estado distinto de 'pagado' (incluye abonos
+  //    'parcial'), el préstamo sigue 'activo'. Solo cuando quedan 0 cuotas
+  //    sin pagar se marca 'completado'.
+  const prestamoId = cuota.prestamo_id;
   const prestamos = Array.isArray(cuota.prestamos)
     ? cuota.prestamos[0]
     : cuota.prestamos;
@@ -144,48 +267,60 @@ export async function registrarCobro(input: {
   const actualizacionPrestamo: Record<string, string | number> = {
     saldo_pendiente: nuevoSaldoPrestamo,
   };
-  if (nuevoSaldoPrestamo <= 0) actualizacionPrestamo.estado = "liquidado";
-  const { error: errorPrestamo } = await supabase
-    .from("prestamos")
-    .update(actualizacionPrestamo)
-    .eq("id", cuota.prestamo_id);
+
+  let errorPrestamo: { message: string } | null = null;
+  const { count: cuotasSinPagar, error: errorConteo } = await supabase
+    .from("cuotas")
+    .select("id", { count: "exact", head: true })
+    .eq("prestamo_id", prestamoId)
+    .neq("estado", "pagado");
+
+  if (errorConteo) {
+    errorPrestamo = errorConteo;
+  } else {
+    actualizacionPrestamo.estado =
+      cuotasSinPagar === 0 ? "completado" : "activo";
+    const { error } = await supabase
+      .from("prestamos")
+      .update(actualizacionPrestamo)
+      .eq("id", prestamoId);
+    errorPrestamo = error;
+  }
 
   if (errorPrestamo) {
+    // Revertir cuota y pago: la operación debe quedar consistente.
+    const { error: errorReversionCuota } = await supabase
+      .from("cuotas")
+      .update({
+        estado: estadoAnterior,
+        monto_pagado: yaPagado,
+        saldo_pendiente: saldoAnterior,
+        fecha_pago: fechaPagoAnterior,
+      })
+      .eq("id", input.cuotaId);
+    const { data: revertidos, error: errorReversionPago } = await supabase
+      .from("pagos")
+      .delete()
+      .eq("id", pagoId)
+      .select("id");
+    if (
+      errorReversionCuota ||
+      errorReversionPago ||
+      !revertidos ||
+      revertidos.length === 0
+    ) {
+      console.error("No se pudo revertir la operación completa:", {
+        cuota: errorReversionCuota?.message,
+        pago:
+          errorReversionPago?.message ??
+          (revertidos && revertidos.length === 0
+            ? "0 filas eliminadas (falta política DELETE en pagos)"
+            : undefined),
+      });
+    }
     return {
       ok: false,
-      error: `La cuota se guardó, pero no se pudo actualizar el préstamo: ${traducirError(errorPrestamo.message)}`,
-    };
-  }
-
-  // 4) Registrar el ingreso en `pagos` (columna estándar fecha_pago).
-  const esAbonoParcial = estadoFinal === "parcial";
-
-  const { data: sesion } = await supabase.auth.getUser();
-  const basePago = {
-    cuota_id: input.cuotaId,
-    monto: redondear(input.monto),
-    fecha_pago: input.fecha,
-    ...(sesion.user?.id ? { user_id: sesion.user.id } : {}),
-  };
-  let errorPago: { message: string } | null = null;
-  const { error: errorPagoMeta } = await supabase.from("pagos").insert({
-    ...basePago,
-    medio_pago: medioPago,
-    es_abono_parcial: esAbonoParcial,
-  });
-  errorPago = errorPagoMeta;
-  if (
-    errorPago &&
-    /column|does not exist|es_abono_parcial|medio_pago/i.test(errorPago.message)
-  ) {
-    const { error: errorPagoBase } = await supabase.from("pagos").insert(basePago);
-    errorPago = errorPagoBase;
-  }
-
-  if (errorPago) {
-    return {
-      ok: false,
-      error: `La cuota se guardó, pero no se pudo registrar en "pagos": ${traducirError(errorPago.message)}`,
+      error: `No se pudo actualizar el préstamo: ${traducirError(errorPrestamo.message)}`,
     };
   }
 

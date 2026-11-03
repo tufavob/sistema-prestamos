@@ -13,6 +13,7 @@ import Modal from "@/components/Modal";
 import BadgeCalificacion from "@/components/BadgeCalificacion";
 import {
   obtenerResumenCliente,
+  recalcularCalificaciones,
   type ResumenCliente,
 } from "@/lib/clientes";
 
@@ -44,6 +45,9 @@ type DatosClientes = {
 };
 
 async function cargarDatosClientes(client: SupabaseClient): Promise<DatosClientes> {
+  // Refresca la calificación antes de responder la lista de clientes.
+  await recalcularCalificaciones(client);
+
   const { data, error } = await client
     .from("clientes")
     .select("*")
