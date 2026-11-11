@@ -1,655 +1,444 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { formatearMoneda } from "@/lib/prestamos";
-import { exportarReporteFinancieroCSV } from "@/lib/exportar";
-import { ETIQUETAS_CALIFICACION, obtenerScoresClientes } from "@/lib/credito";
+import {
+  formatearFechaLarga,
+  getMetricasCajaHoy,
+  getMetricasCarteraActiva,
+  getMetricasMoraVencida,
+  hoyPeruYMD,
+} from "@/lib/financiero-core";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
-type MoraCliente = {
-  id: string;
-  nombres: string;
-  apellidos: string;
-  montoVencido: number;
-  diasMora: number;
-  cuotasVencidas: number;
-};
+/* ------------------------------------------------------------------ */
+/* Tipos                                                               */
+/* ------------------------------------------------------------------ */
 
-type ResultadoDashboard = {
-  error: string | null;
+type Metricas = {
   hoy: string;
-  recaudoHoy: number;
-  totalPorCobrar: number;
-  cuotasPorCobrar: number;
-  capitalEnCalle: number;
+  recaudadoHoy: number;
+  transaccionesHoy: number;
+  capitalPrincipal: number;
   gananciaProyectada: number;
+  totalCartera: number;
   prestamosActivos: number;
-  totalPrestadoHoy: number;
-  cajaNetaHoy: number;
-  mora: MoraCliente[];
+  montoTotalMora: number;
+  clientesMorososUnicos: number;
+  totalCuotasVencidas: number;
 };
 
-type RawCliente = { id: string; nombres: string; apellidos: string };
-type RawCuotaMora = {
-  numero_cuota?: number;
-  saldo_pendiente: number;
-  estado: string;
-  fecha_vencimiento: string;
-  prestamos:
-    | { clientes: RawCliente | RawCliente[] | null }
-    | { clientes: RawCliente | RawCliente[] | null }[]
-    | null;
+/* ------------------------------------------------------------------ */
+/* Cálculo de métricas (motor unificado)                               */
+/* ------------------------------------------------------------------ */
+
+const obtenerMetricas = async (): Promise<Metricas | string> => {
+  if (!supabase) {
+    return "Configura NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_ANON_KEY en .env.local.";
+  }
+
+  try {
+    const [caja, cartera, mora] = await Promise.all([
+      getMetricasCajaHoy(supabase),
+      getMetricasCarteraActiva(supabase),
+      getMetricasMoraVencida(supabase),
+    ]);
+
+    return {
+      hoy: caja.fecha,
+      recaudadoHoy: caja.recaudadoHoy,
+      transaccionesHoy: caja.transaccionesHoy,
+      capitalPrincipal: cartera.capitalPrincipal,
+      gananciaProyectada: cartera.gananciaProyectada,
+      totalCartera: cartera.totalCartera,
+      prestamosActivos: cartera.prestamosActivos,
+      montoTotalMora: mora.montoTotalMora,
+      clientesMorososUnicos: mora.clientesMorososUnicos,
+      totalCuotasVencidas: mora.totalCuotasVencidas,
+    };
+  } catch (e) {
+    return e instanceof Error
+      ? e.message
+      : "No se pudieron cargar las métricas del negocio.";
+  }
 };
 
-type RawCuotaHoy = {
-  monto: number;
-  saldo_pendiente: number;
-  estado: string;
-  fecha_vencimiento: string;
+/* ------------------------------------------------------------------ */
+/* Piezas visuales                                                     */
+/* ------------------------------------------------------------------ */
+
+type Tono = "emerald" | "blue" | "indigo" | "amber" | "slate";
+
+const TONOS: Record<
+  Tono,
+  { borde: string; icono: string; valor: string; acento: string }
+> = {
+  emerald: {
+    borde: "border-emerald-500/20",
+    icono: "bg-emerald-500/10 text-emerald-400 ring-emerald-500/20",
+    valor: "text-emerald-400",
+    acento: "bg-emerald-500/60",
+  },
+  blue: {
+    borde: "border-blue-500/20",
+    icono: "bg-blue-500/10 text-blue-400 ring-blue-500/20",
+    valor: "text-blue-400",
+    acento: "bg-blue-500/60",
+  },
+  indigo: {
+    borde: "border-indigo-500/20",
+    icono: "bg-indigo-500/10 text-indigo-400 ring-indigo-500/20",
+    valor: "text-indigo-400",
+    acento: "bg-indigo-500/60",
+  },
+  amber: {
+    borde: "border-amber-500/25",
+    icono: "bg-amber-500/10 text-amber-400 ring-amber-500/25",
+    valor: "text-amber-400",
+    acento: "bg-amber-500/60",
+  },
+  slate: {
+    borde: "border-slate-800",
+    icono: "bg-slate-800/80 text-slate-400 ring-slate-700/60",
+    valor: "text-slate-100",
+    acento: "bg-slate-600/60",
+  },
 };
 
-// Formas genéricas de filas con `select('*')` (columnas opcionales para no
-// asumir nombres que pueden no existir en la BD).
-type RawPrestamo = {
-  id: string;
-  monto?: number | null;
-  monto_prestado?: number;
-  monto_interes?: number;
-  interes?: number;
-  monto_total?: number;
-  total_devolver?: number;
-  estado?: string | null;
-  saldo_pendiente?: number | null;
-  created_at?: string;
-};
-type RawPago = {
-  id: string;
-  monto: number;
-  fecha_pago: string;
-  cuota_id: string;
-};
+function TarjetaMetrica({
+  titulo,
+  valor,
+  detalle,
+  tono,
+  icono,
+  cargando,
+}: {
+  titulo: string;
+  valor: string;
+  detalle: string;
+  tono: Tono;
+  icono: ReactNode;
+  cargando: boolean;
+}) {
+  const estilo = TONOS[tono];
 
-type RawClienteExport = {
-  id: string;
-  nombres: string;
-  apellidos: string;
-  dni: string | null;
-};
+  return (
+    <div
+      className={`relative overflow-hidden rounded-2xl border ${estilo.borde} bg-slate-900/80 p-5 shadow-lg shadow-slate-950/30`}
+    >
+      <span
+        className={`absolute inset-y-0 left-0 w-0.5 ${estilo.acento}`}
+        aria-hidden="true"
+      />
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+          {titulo}
+        </p>
+        <span
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset ${estilo.icono}`}
+        >
+          {icono}
+        </span>
+      </div>
 
-type RawPrestamoExport = {
-  id: string;
-  cliente_id: string | null;
-  estado?: string | null;
-  monto?: number | null;
-  monto_prestado?: number | null;
-  monto_total?: number | null;
-};
+      {cargando ? (
+        <div className="mt-3 h-8 w-32 animate-pulse rounded-lg bg-slate-800/80" />
+      ) : (
+        <p
+          className={`mt-3 text-3xl font-bold tracking-tight tabular-nums ${estilo.valor}`}
+        >
+          {valor}
+        </p>
+      )}
+      <p className="mt-1.5 text-xs text-slate-400">{detalle}</p>
+    </div>
+  );
+}
 
-type RawCuotaExport = {
-  prestamo_id: string | null;
-  estado: string | null;
-  saldo_pendiente?: number | null;
-  monto?: number | null;
-};
+const IconoDinero = (
+  <svg
+    className="h-4 w-4"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <rect x="2" y="6" width="20" height="12" rx="2" />
+    <circle cx="12" cy="12" r="2.5" />
+    <path d="M6 12h.01M18 12h.01" />
+  </svg>
+);
 
-const ESTADOS_POR_COBRAR = ["pendiente", "parcial", "vencido"];
+const IconoCapital = (
+  <svg
+    className="h-4 w-4"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M3 21h18" />
+    <path d="M5 21V8l7-4 7 4v13" />
+    <path d="M9 21v-6h6v6" />
+  </svg>
+);
 
-const primero = <T,>(x: T | T[] | null | undefined): T | null =>
-  Array.isArray(x) ? (x[0] ?? null) : (x ?? null);
+const IconoGanancia = (
+  <svg
+    className="h-4 w-4"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="m3 17 6-6 4 4 8-8" />
+    <path d="M15 7h6v6" />
+  </svg>
+);
 
-const aDate = (s: string) => {
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(y, m - 1, d);
-};
+const IconoAlerta = (
+  <svg
+    className="h-4 w-4"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+    <path d="M12 9v4M12 17h.01" />
+  </svg>
+);
 
-const diasMora = (hoy: string, fecha: string) =>
-  Math.max(1, Math.round((aDate(hoy).getTime() - aDate(fecha).getTime()) / 86400000));
+const IconoFlecha = (
+  <svg
+    className="h-4 w-4"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M5 12h14M13 6l6 6-6 6" />
+  </svg>
+);
 
-// Proporción de interés de cada préstamo: (monto_total - monto) / monto_total.
-// Se usa para desglosar capital vs. ganancia en saldos y cobros.
-  const proporcionGanancia = (p: RawPrestamo): number => {
-    const monto = Number(p.monto_prestado ?? p.monto ?? 0);
-    const totalDevolver = Number(p.monto_total ?? p.total_devolver ?? monto * 1.2);
-    return totalDevolver > 0
-      ? Math.max(0, (totalDevolver - monto) / totalDevolver)
-      : 0.1666;
-  };
+/* ------------------------------------------------------------------ */
+/* Página                                                              */
+/* ------------------------------------------------------------------ */
 
 export default function Dashboard() {
   const [cargando, setCargando] = useState(true);
   const [errorGlobal, setErrorGlobal] = useState<string | null>(null);
-  const [datos, setDatos] = useState<ResultadoDashboard | null>(null);
-  const [exportando, setExportando] = useState(false);
-
-  const obtenerDashboard = useCallback(async (): Promise<ResultadoDashboard | null> => {
-    if (!supabase) return null;
-    const hoy = new Date().toLocaleDateString("en-CA");
-
-    let totalPorCobrar = 0;
-    let cuotasPorCobrar = 0;
-    let recaudoHoy = 0;
-    let prestamosActivos = 0;
-    let totalPrestadoHoy = 0;
-    let capitalEnCalle = 0;
-    let gananciaProyectada = 0;
-
-    // 1) Pagos y préstamos con `select('*')` para evitar errores 400 por
-    //    nombres de columnas inexistentes. Se asocian en memoria por IDs.
-    const [pagosRes, prestamosResRaw] = await Promise.all([
-      supabase.from("pagos").select("*"),
-      supabase
-        .from("prestamos")
-        .select("*")
-        .eq("estado", "activo"),
-    ]);
-
-    const prestamoPorId = new Map<string, RawPrestamo>();
-    if (prestamosResRaw.error) {
-      console.error("Dashboard (préstamos):", prestamosResRaw.error.message);
-    } else {
-      for (const p of (prestamosResRaw.data ?? []) as unknown as RawPrestamo[]) {
-        prestamoPorId.set(p.id, p);
-      }
-    }
-
-    // Total prestado HOY (desembolsos de la fecha actual) para la caja neta.
-    for (const p of prestamoPorId.values()) {
-      const fechaCreacion = String(p.created_at ?? "").substring(0, 10);
-      if (fechaCreacion === hoy) {
-        totalPrestadoHoy += Number(p.monto_prestado ?? p.monto ?? 0);
-      }
-    }
-
-    if (pagosRes.error) {
-      console.error("Dashboard (pagos):", pagosRes.error.message);
-    } else {
-      for (const p of (pagosRes.data ?? []) as unknown as RawPago[]) {
-        const montoPago = Number(p.monto ?? 0);
-        // Fecha segura: "YYYY-MM-DD" vía substring (evita descuadres UTC).
-        const fechaPagoStr = String(p.fecha_pago ?? "").substring(0, 10);
-        if (fechaPagoStr === hoy) {
-          recaudoHoy += montoPago;
-        }
-      }
-    }
-
-    // 2) Por cobrar HOY, cuotas pendientes (para cartera activa por cuotas) y mora.
-    const [porCobrarRes, moraRes, cuotasPendientesRes] = await Promise.all([
-      supabase
-        .from("cuotas")
-        .select("monto, saldo_pendiente, estado, fecha_vencimiento")
-        .eq("fecha_vencimiento", hoy)
-        .eq("estado", "pendiente"),
-      supabase
-        .from("cuotas")
-        .select(
-          "numero_cuota, saldo_pendiente, estado, fecha_vencimiento, prestamos!inner(clientes!inner(id, nombres, apellidos))",
-        )
-        .lt("fecha_vencimiento", hoy)
-        .in("estado", ESTADOS_POR_COBRAR),
-      supabase.from("cuotas").select("*"),
-    ]);
-
-    // Log de control solicitado
-    if (cuotasPendientesRes.error) {
-      console.error(
-        "Dashboard (cuotas para cartera activa):",
-        cuotasPendientesRes.error.message,
-      );
-    } else {
-      console.log(
-        "Préstamos/Cuotas activas encontradas:",
-        cuotasPendientesRes.data,
-      );
-    }
-
-    // Cartera activa basada en CUOTAS pendientes (no depende solo del estado del préstamo)
-    const prestamosActivosSet = new Set<string>();
-    capitalEnCalle = 0;
-    gananciaProyectada = 0;
-    if (!cuotasPendientesRes.error) {
-      for (const c of (cuotasPendientesRes.data ?? []) as unknown as Array<{
-        id: string;
-        prestamo_id: string;
-        estado?: string | null;
-        monto?: number | null;
-        monto_pagado?: number | null;
-        saldo_pendiente?: number | null;
-      }>) {
-        const estadoCuota = String(c.estado ?? "").toLowerCase();
-        if (estadoCuota === "pagado") continue;
-        const montoCuota = Number(c.monto ?? 0);
-        const montoPagadoCuota = Number(c.monto_pagado ?? 0);
-        if (montoPagadoCuota >= montoCuota) continue;
-        const saldoPendCuota = Number(c.saldo_pendiente ?? 0);
-        if (saldoPendCuota <= 0) continue;
-
-        const prestamo = prestamoPorId.get(c.prestamo_id);
-        if (!prestamo) continue;
-
-        const prop = proporcionGanancia(prestamo);
-        capitalEnCalle += saldoPendCuota * (1 - prop);
-        gananciaProyectada += saldoPendCuota * prop;
-        prestamosActivosSet.add(c.prestamo_id);
-      }
-    }
-    prestamosActivos = prestamosActivosSet.size;
-
-    if (porCobrarRes.error) {
-      console.error(
-        "Dashboard (cuotas con vencimiento hoy):",
-        porCobrarRes.error.message,
-      );
-    } else {
-      for (const cuota of (porCobrarRes.data ?? []) as unknown as RawCuotaHoy[]) {
-        totalPorCobrar += Number(cuota.saldo_pendiente ?? 0);
-        cuotasPorCobrar += 1;
-      }
-    }
-
-    const moraMap = new Map<string, MoraCliente>();
-    if (moraRes.error) {
-      console.error("Dashboard (cuotas en mora):", moraRes.error.message);
-    } else {
-      for (const raw of (moraRes.data ?? []) as unknown as RawCuotaMora[]) {
-        const prestamo = primero(raw.prestamos);
-        const cliente = prestamo ? primero(prestamo.clientes) : null;
-        if (!cliente) continue;
-        const saldo = Number(raw.saldo_pendiente);
-        const dias = diasMora(hoy, raw.fecha_vencimiento);
-        const existente = moraMap.get(cliente.id);
-        if (existente) {
-          existente.montoVencido += saldo;
-          existente.cuotasVencidas += 1;
-          existente.diasMora = Math.max(existente.diasMora, dias);
-        } else {
-          moraMap.set(cliente.id, {
-            id: cliente.id,
-            nombres: cliente.nombres,
-            apellidos: cliente.apellidos,
-            montoVencido: saldo,
-            diasMora: dias,
-            cuotasVencidas: 1,
-          });
-        }
-      }
-    }
-
-    const moraOrdenada = Array.from(moraMap.values()).sort(
-      (a, b) => b.montoVencido - a.montoVencido,
-    );
-
-    return {
-      error: null,
-      hoy,
-      recaudoHoy: Math.round(recaudoHoy * 100) / 100,
-      totalPorCobrar: Math.round(totalPorCobrar * 100) / 100,
-      cuotasPorCobrar,
-      capitalEnCalle: Math.round(capitalEnCalle * 100) / 100,
-      gananciaProyectada: Math.round(gananciaProyectada * 100) / 100,
-      prestamosActivos,
-      totalPrestadoHoy: Math.round(totalPrestadoHoy * 100) / 100,
-      cajaNetaHoy: Math.round((recaudoHoy - totalPrestadoHoy) * 100) / 100,
-      mora: moraOrdenada,
-    };
-  }, []);
+  const [metricas, setMetricas] = useState<Metricas | null>(null);
 
   useEffect(() => {
     let activo = true;
-    const iniciar = async () => {
-      const res = await obtenerDashboard();
+    const cargar = async () => {
+      const res = await obtenerMetricas();
       if (!activo) return;
-      if (res === null) {
-        setErrorGlobal("No se pudieron calcular las métricas del dashboard.");
-      } else if (res.error) {
-        setErrorGlobal(res.error);
+      if (typeof res === "string") {
+        setErrorGlobal(res);
+        setMetricas(null);
       } else {
-        setDatos(res);
+        setErrorGlobal(null);
+        setMetricas(res);
       }
       setCargando(false);
     };
-    iniciar();
+    void cargar();
     return () => {
       activo = false;
     };
-  }, [obtenerDashboard]);
+  }, []);
 
-  const montoVencidoTotal = datos?.mora.reduce((s, m) => s + m.montoVencido, 0) ?? 0;
-
-  const exportarReporte = async () => {
-    if (!supabase || !datos) return;
-    setExportando(true);
-    setErrorGlobal(null);
-    try {
-      const [prestamosRes, clientesRes, cuotasRes, pagosRes] = await Promise.all([
-        supabase.from("prestamos").select("*"),
-        supabase
-          .from("clientes")
-          .select("id, nombres, apellidos, dni"),
-        supabase.from("cuotas").select("*"),
-        supabase.from("pagos").select("*"),
-      ]);
-
-      const primerError =
-        prestamosRes.error ??
-        clientesRes.error ??
-        cuotasRes.error ??
-        pagosRes.error;
-      if (primerError) {
-        setErrorGlobal(`No se pudo exportar el reporte: ${primerError.message}`);
-        return;
-      }
-
-      const prestamos = (prestamosRes.data ?? []) as unknown as RawPrestamoExport[];
-      const clientesRaw = (clientesRes.data ?? []) as unknown as RawClienteExport[];
-      const cuotasRaw = (cuotasRes.data ?? []) as unknown as RawCuotaExport[];
-      const pagosRaw = (pagosRes.data ?? []) as unknown as RawPago[];
-
-      const clientePorId = new Map(clientesRaw.map((c) => [c.id, c]));
-
-      const cuotasPorPrestamo = new Map<string, RawCuotaExport[]>();
-      for (const c of cuotasRaw) {
-        if (!c.prestamo_id) continue;
-        const lista = cuotasPorPrestamo.get(c.prestamo_id) ?? [];
-        lista.push(c);
-        cuotasPorPrestamo.set(c.prestamo_id, lista);
-      }
-
-      const r2 = (n: number) => Math.round(n * 100) / 100;
-
-      const saldoDe = (p: RawPrestamoExport): number => {
-        const cuotas = cuotasPorPrestamo.get(p.id) ?? [];
-        return r2(
-          cuotas
-            .filter((c) => String(c.estado ?? "").toLowerCase() !== "pagado")
-            .reduce((acc, c) => acc + Number(c.saldo_pendiente ?? c.monto ?? 0), 0),
-        );
-      };
-
-      const totalPrestado = r2(
-        prestamos.reduce(
-          (acc, p) => acc + Number(p.monto_total ?? p.monto_prestado ?? p.monto ?? 0),
-          0,
-        ),
-      );
-      const totalCobrado = r2(
-        pagosRaw.reduce((acc, p) => acc + Number(p.monto ?? 0), 0),
-      );
-      const saldoPendienteGeneral = r2(
-        cuotasRaw
-          .filter((c) => String(c.estado ?? "").toLowerCase() !== "pagado")
-          .reduce((acc, c) => acc + Number(c.saldo_pendiente ?? c.monto ?? 0), 0),
-      );
-      const cobrosDelDia = r2(
-        pagosRaw
-          .filter(
-            (p) => String(p.fecha_pago ?? "").substring(0, 10) === datos.hoy,
-          )
-          .reduce((acc, p) => acc + Number(p.monto ?? 0), 0),
-      );
-
-      const scores = await obtenerScoresClientes(
-        supabase,
-        prestamos
-          .map((p) => p.cliente_id)
-          .filter((x): x is string => Boolean(x)),
-      );
-
-      const cartera = prestamos.map((p) => {
-        const cliente = p.cliente_id ? clientePorId.get(p.cliente_id) : null;
-        const saldo = saldoDe(p);
-        const finalizado =
-          saldo <= 0 ||
-          ["finalizado", "liquidado", "completado", "cancelado"].includes(
-            String(p.estado ?? "").toLowerCase(),
-          );
-        const calificacion = p.cliente_id
-          ? scores.get(p.cliente_id)?.calificacion
-          : undefined;
-        return {
-          cliente: cliente
-            ? `${cliente.nombres} ${cliente.apellidos}`
-            : "Cliente eliminado",
-          dni: cliente?.dni ?? "",
-          calificacion: calificacion
-            ? ETIQUETAS_CALIFICACION[calificacion]
-            : "",
-          monto: Number(p.monto_prestado ?? p.monto ?? 0),
-          saldoPendiente: saldo,
-          estado: finalizado ? "Finalizado" : "Activo",
-        };
-      });
-
-      exportarReporteFinancieroCSV(
-        {
-          totalPrestado,
-          totalCobrado,
-          saldoPendienteGeneral,
-          cobrosDelDia,
-        },
-        cartera,
-        datos.hoy,
-      );
-    } catch {
-      setErrorGlobal(
-        "No se pudo exportar el reporte. Intenta nuevamente.",
-      );
-    } finally {
-      setExportando(false);
-    }
-  };
+  const fechaHoy = metricas?.hoy ?? hoyPeruYMD();
+  const totalCartera = metricas?.totalCartera ?? 0;
+  const pctCapital =
+    totalCartera > 0
+      ? Math.round(((metricas?.capitalPrincipal ?? 0) / totalCartera) * 100)
+      : 0;
+  const pctGanancia = totalCartera > 0 ? 100 - pctCapital : 0;
+  const hayMora = (metricas?.montoTotalMora ?? 0) > 0;
 
   return (
-    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 px-4 py-8 sm:px-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
+    <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-8 sm:px-6">
+      {/* Encabezado */}
+      <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-100 sm:text-3xl dark:text-zinc-50">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-400/80">
+            Resumen ejecutivo
+          </p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-50 sm:text-3xl">
             Dashboard financiero
           </h1>
-          <p className="mt-1 text-sm text-slate-400 dark:text-zinc-400">
-            {datos
-              ? aDate(datos.hoy).toLocaleDateString("es-PE", {
-                  weekday: "long",
-                  day: "numeric",
-                  month: "long",
-                  year: "numeric",
-                })
-              : "Cargando resumen..."}
+          <p className="mt-1 text-sm text-slate-400">
+            {formatearFechaLarga(fechaHoy)} · Zona horaria Perú
           </p>
         </div>
-        <button
-          type="button"
-          onClick={exportarReporte}
-          disabled={exportando || cargando}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/50 transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {exportando ? (
-            <Spinner />
-          ) : (
-            <svg
-              className="h-4 w-4"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <path d="m7 10 5 5 5-5" />
-              <path d="M12 15V3" />
-            </svg>
-          )}
-          Exportar Reporte
-        </button>
+        <span className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1.5 text-xs font-medium text-slate-300">
+          <span
+            className={`h-2 w-2 rounded-full ${
+              errorGlobal
+                ? "bg-red-500"
+                : cargando
+                  ? "animate-pulse bg-amber-400"
+                  : "bg-emerald-500"
+            }`}
+            aria-hidden="true"
+          />
+          {errorGlobal
+            ? "Datos no disponibles"
+            : cargando
+              ? "Actualizando..."
+              : "Datos al día"}
+        </span>
       </header>
 
-      {!supabase && (
-        <div className="rounded-lg border border-amber-800 bg-amber-950/60 p-4 text-sm text-amber-300 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          Configura las variables{" "}
-          <code className="font-mono">NEXT_PUBLIC_SUPABASE_URL</code> y{" "}
-          <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code> en{" "}
-          <code className="font-mono">.env.local</code>.
-        </div>
-      )}
-
       {errorGlobal && (
-        <div className="rounded-lg border border-red-800 bg-red-950/60 p-4 text-sm text-red-300 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
+        <div className="rounded-xl border border-red-900/60 bg-red-950/40 p-4 text-sm text-red-300">
           {errorGlobal}
         </div>
       )}
 
-{/* TARJETA 1: CAJA DEL DÍA */}
-      <section aria-label="Caja del día" className="rounded-2xl border border-slate-800/80 bg-slate-900/80 p-5 shadow-sm sm:p-6">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
-            Caja del Día
-          </p>
-          <span className="shrink-0 rounded-lg bg-teal-950/70 p-2 text-teal-400">
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M3 3v18h18" />
-              <path d="m7 14 4-4 3 3 5-6" />
-            </svg>
-          </span>
-        </div>
-        {cargando || !datos ? (
-          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
-        ) : (
-          <>
-            <p className={`mt-3 text-3xl font-black tracking-tight ${datos.cajaNetaHoy < 0 ? "text-red-400" : "text-emerald-400"}`}>
-              {formatearMoneda(datos.cajaNetaHoy)}
-            </p>
-            <p className="mt-3 text-sm font-medium text-slate-400">
-              Cobrado: {formatearMoneda(datos.recaudoHoy)} · Prestado: {formatearMoneda(datos.totalPrestadoHoy)}
-            </p>
-          </>
-        )}
+      {/* 4 bloques principales */}
+      <section
+        aria-label="Indicadores del día"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4"
+      >
+        <TarjetaMetrica
+          titulo="Caja del día"
+          valor={formatearMoneda(metricas?.recaudadoHoy ?? 0)}
+          detalle={`${metricas?.transaccionesHoy ?? 0} ${
+            (metricas?.transaccionesHoy ?? 0) === 1
+              ? "transacción registrada"
+              : "transacciones registradas"
+          } hoy`}
+          tono="emerald"
+          icono={IconoDinero}
+          cargando={cargando}
+        />
+
+        <TarjetaMetrica
+          titulo="Capital Principal"
+          valor={formatearMoneda(metricas?.capitalPrincipal ?? 0)}
+          detalle={`${metricas?.prestamosActivos ?? 0} ${
+            (metricas?.prestamosActivos ?? 0) === 1
+              ? "préstamo activo"
+              : "préstamos activos"
+          }`}
+          tono="blue"
+          icono={IconoCapital}
+          cargando={cargando}
+        />
+
+        <TarjetaMetrica
+          titulo="Ganancia proyectada"
+          valor={formatearMoneda(metricas?.gananciaProyectada ?? 0)}
+          detalle="Interés por recuperar"
+          tono="indigo"
+          icono={IconoGanancia}
+          cargando={cargando}
+        />
+
+        <TarjetaMetrica
+          titulo="Mora real vencida"
+          valor={formatearMoneda(metricas?.montoTotalMora ?? 0)}
+          detalle={
+            hayMora
+              ? `${metricas?.clientesMorososUnicos ?? 0} ${
+                  (metricas?.clientesMorososUnicos ?? 0) === 1
+                    ? "cliente"
+                    : "clientes"
+                } · ${metricas?.totalCuotasVencidas ?? 0} ${
+                  (metricas?.totalCuotasVencidas ?? 0) === 1
+                    ? "cuota"
+                    : "cuotas"
+                }`
+              : "Sin cuotas vencidas"
+          }
+          tono={hayMora ? "amber" : "slate"}
+          icono={IconoAlerta}
+          cargando={cargando}
+        />
       </section>
 
-      {/* TARJETA 2: COBRANZA DE HOY */}
-      <section aria-label="Cobranza de hoy" className="rounded-2xl border border-slate-800/80 bg-slate-900/80 p-5 shadow-sm sm:p-6">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
-            Cobranza de Hoy
-          </p>
-          <span className="shrink-0 rounded-lg bg-amber-950/70 p-2 text-amber-400">
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 7v5l3 3" />
-            </svg>
-          </span>
-        </div>
-        {cargando || !datos ? (
-          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
-        ) : (
-          <>
-            <p className="mt-3 text-3xl font-black tracking-tight text-emerald-400">
-              {formatearMoneda(datos.totalPorCobrar)}
+      {/* Banner inferior: valor total de cartera activa */}
+      <section
+        aria-label="Valor total de cartera activa"
+        className="overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-r from-slate-900 via-slate-900 to-slate-900/60 p-5 shadow-lg shadow-slate-950/30 sm:p-6"
+      >
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+              Valor total de cartera activa
             </p>
-            <p className="mt-3 text-sm font-medium text-slate-400">
-              {datos.cuotasPorCobrar} cuota
-              {datos.cuotasPorCobrar === 1 ? "" : "s"} programada
-              {datos.cuotasPorCobrar === 1 ? "" : "s"} para hoy
+            <p className="mt-1.5 text-3xl font-bold tracking-tight text-slate-50 tabular-nums sm:text-4xl">
+              {formatearMoneda(totalCartera)}
             </p>
-            <Link
-              href="/cobros"
-              className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-500 px-4 py-3 text-sm font-bold text-white shadow-md shadow-emerald-950/40 transition hover:from-emerald-500 hover:to-teal-400"
-            >
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-              </svg>
-              Ir a Ruta de Cobro
-            </Link>
-          </>
-        )}
-      </section>
+            <p className="mt-1.5 text-xs text-slate-400">
+              Capital {formatearMoneda(metricas?.capitalPrincipal ?? 0)}
+              <span className="mx-1.5 text-slate-600">+</span>
+              Ganancia{" "}
+              {formatearMoneda(metricas?.gananciaProyectada ?? 0)}
+            </p>
 
-      {/* TARJETA 3: CAPITAL Y GANANCIA ACTIVA */}
-      <section aria-label="Capital y ganancia activa" className="rounded-2xl border border-slate-800/80 bg-slate-900/80 p-5 shadow-sm sm:p-6">
-        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
-          Capital y Ganancia Activa
-        </p>
-        {cargando || !datos ? (
-          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
-        ) : (
-          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-              <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
-                Fierro (capital por recuperar)
-              </p>
-              <p className="mt-1.5 text-2xl font-black tracking-tight text-slate-100">
-                {formatearMoneda(datos.capitalEnCalle)}
-              </p>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-              <p className="text-xs font-bold uppercase tracking-wide text-emerald-400">
-                Ganancia (interés por recuperar)
-              </p>
-              <p className="mt-1.5 text-2xl font-black tracking-tight text-emerald-400">
-                {formatearMoneda(datos.gananciaProyectada)}
-              </p>
-            </div>
+            {totalCartera > 0 && (
+              <div className="mt-4 max-w-md">
+                <div
+                  className="flex h-1.5 w-full overflow-hidden rounded-full bg-slate-800"
+                  role="img"
+                  aria-label={`${pctCapital}% capital y ${pctGanancia}% ganancia`}
+                >
+                  <div
+                    className="h-full bg-blue-500"
+                    style={{ width: `${pctCapital}%` }}
+                  />
+                  <div
+                    className="h-full bg-indigo-500"
+                    style={{ width: `${pctGanancia}%` }}
+                  />
+                </div>
+                <div className="mt-1.5 flex items-center gap-4 text-[11px] text-slate-500">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+                    Capital {pctCapital}%
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                    Ganancia {pctGanancia}%
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
-        )}
-      </section>
 
-      {/* TARJETA 4: CLIENTES EN MORA */}
-      <section aria-label="Clientes en mora" className={`rounded-2xl border-2 p-5 shadow-sm sm:p-6 ${datos && datos.mora.length > 0 ? "border-red-900/60 bg-red-950/30" : "border-slate-800/80 bg-slate-900/80"}`}>
-        <div className="flex items-center justify-between gap-3">
-          <p className={`text-xs font-bold uppercase tracking-wide ${datos && datos.mora.length > 0 ? "text-red-300" : "text-slate-400"}`}>
-            Clientes en Mora
-          </p>
-          <span className={`shrink-0 rounded-lg p-2 ${datos && datos.mora.length > 0 ? "bg-red-900/50 text-red-300" : "bg-slate-800/80 text-slate-400"}`}>
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M21 12a9 9 0 1 1-9-9" />
-              <path d="M12 8v4l3 3" />
-            </svg>
-          </span>
+          <Link
+            href="/cobros"
+            className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/40 transition hover:bg-emerald-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
+          >
+            Ir a Ruta de Cobro
+            {IconoFlecha}
+          </Link>
         </div>
-        {cargando || !datos ? (
-          <div className="mt-4 h-20 animate-pulse rounded-xl border-2 border-slate-800 bg-slate-800/60 shadow-sm" />
-        ) : (
-          <>
-            <p className={`mt-3 text-3xl font-black tracking-tight ${datos.mora.length > 0 ? "text-red-300" : "text-slate-100"}`}>
-              {formatearMoneda(montoVencidoTotal)}
-            </p>
-            <p className="mt-3 text-sm font-medium text-slate-400">
-              {datos.mora.length} cliente
-              {datos.mora.length === 1 ? "" : "s"} moroso
-              {datos.mora.length === 1 ? "" : "s"}
-            </p>
-          </>
-        )}
       </section>
     </main>
-  );
-}
-
-function Spinner() {
-  return (
-    <svg
-      className="h-4 w-4 animate-spin"
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-    >
-      <circle
-        className="opacity-25"
-        cx="12"
-        cy="12"
-        r="10"
-        stroke="currentColor"
-        strokeWidth="4"
-      />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-      />
-    </svg>
   );
 }
