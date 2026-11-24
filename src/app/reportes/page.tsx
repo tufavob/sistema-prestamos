@@ -18,6 +18,12 @@ import {
   type ReporteHistorico,
   type Reportes,
 } from "@/lib/financiero-core";
+import {
+  descargarArchivo,
+  generarPdf,
+  generarXlsx,
+  prepararDatosExportacion,
+} from "@/lib/exportar-reportes";
 import { TarjetaKPI } from "@/components/reportes/TarjetaKPI";
 import { BarrasSemana } from "@/components/reportes/BarrasSemana";
 import { BarrasPeriodo } from "@/components/reportes/BarrasPeriodo";
@@ -141,6 +147,13 @@ const IconoImpresora = svg(
 const IconoFlecha = svg(
   <>
     <path d="M5 12h14M13 6l6 6-6 6" />
+  </>,
+);
+
+const IconoExcel = svg(
+  <>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <path d="M3 9h18M3 15h18M9 3v18" />
   </>,
 );
 
@@ -715,6 +728,8 @@ export default function ReportesPage() {
     Boolean(supabase),
   );
   const [errorHistorico, setErrorHistorico] = useState<string | null>(null);
+  const [exportando, setExportando] = useState<"excel" | "pdf" | null>(null);
+  const [errorExport, setErrorExport] = useState<string | null>(null);
 
   useEffect(() => {
     let activo = true;
@@ -846,6 +861,55 @@ export default function ReportesPage() {
       ? (errorHistorico ?? (supabase ? null : error))
       : error;
 
+  const exportar = (formato: "excel" | "pdf") => {
+    const origen = periodo === "historico" ? historico : datos;
+    if (!origen) {
+      setErrorExport(
+        cargandoVisible
+          ? "Espera a que terminen de cargar los datos."
+          : "No hay datos disponibles para exportar.",
+      );
+      return;
+    }
+
+    setErrorExport(null);
+    setExportando(formato);
+    try {
+      const preparado = prepararDatosExportacion({
+        periodo,
+        datos,
+        historico,
+        rango,
+        hoy,
+      });
+      const sufijo =
+        periodo === "historico" ? `${rango.desde}_${rango.hasta}` : hoy;
+      const nombre = `Reporte_Financiero_${periodo}_${sufijo}`;
+
+      if (formato === "excel") {
+        descargarArchivo(
+          generarXlsx(preparado),
+          `${nombre}.xlsx`,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        );
+      } else {
+        descargarArchivo(
+          generarPdf(preparado),
+          `${nombre}.pdf`,
+          "application/pdf",
+        );
+      }
+    } catch (e) {
+      setErrorExport(
+        e instanceof Error
+          ? `No se pudo generar el archivo: ${e.message}`
+          : "No se pudo generar el archivo.",
+      );
+    } finally {
+      setExportando(null);
+    }
+  };
+
   return (
     <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-8 sm:px-6">
       {/* Encabezado */}
@@ -893,11 +957,27 @@ export default function ReportesPage() {
           </button>
           <button
             type="button"
-            onClick={() => window.print()}
-            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/70 px-3 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"
+            onClick={() => exportar("excel")}
+            disabled={exportando !== null || cargandoVisible}
+            title="Descargar reporte en Excel"
+            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/70 px-3 text-xs font-semibold text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
           >
-            {IconoImpresora}
-            Exportar PDF
+            <span className={exportando === "excel" ? "animate-spin" : ""}>
+              {exportando === "excel" ? IconoActualizar : IconoExcel}
+            </span>
+            Excel
+          </button>
+          <button
+            type="button"
+            onClick={() => exportar("pdf")}
+            disabled={exportando !== null || cargandoVisible}
+            title="Descargar reporte en PDF"
+            className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/70 px-3 text-xs font-semibold text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+          >
+            <span className={exportando === "pdf" ? "animate-spin" : ""}>
+              {exportando === "pdf" ? IconoActualizar : IconoImpresora}
+            </span>
+            PDF
           </button>
         </div>
       </header>
@@ -994,9 +1074,9 @@ export default function ReportesPage() {
         </section>
       )}
 
-      {errorVisible && (
+      {(errorVisible || errorExport) && (
         <div className="rounded-xl border border-red-900/60 bg-red-950/40 p-4 text-sm text-red-300">
-          {errorVisible}
+          {[errorVisible, errorExport].filter(Boolean).join(" ")}
         </div>
       )}
 
