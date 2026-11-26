@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
@@ -77,22 +78,22 @@ export default function LoginPage() {
   return (
     <main className={FONDO_GRADIENTE}>
       <div className="max-w-md w-full rounded-2xl border border-slate-800 border-t-4 border-t-emerald-500 bg-slate-900/90 p-8 text-slate-100 shadow-2xl backdrop-blur-md">
-        <div className="relative mx-auto mb-4 h-28 w-28">
-          <div className="absolute -inset-1 animate-pulse rounded-full bg-gradient-to-r from-emerald-500 to-teal-400 opacity-75 blur-md"></div>
-          <img
-            src="https://www.shutterstock.com/image-vector/money-logo-design-vector-illustrative-260nw-2007522596.jpg"
-            alt="Sistema de Préstamos"
-            className="relative h-28 w-28 rounded-full border-2 border-emerald-400 bg-slate-900 p-1 object-cover shadow-2xl"
+        <div className="mb-6 flex flex-col items-center gap-3 text-center">
+          <Image
+            src="/logo-ag.png"
+            alt="A&G Finanzas"
+            width={940}
+            height={585}
+            className="h-auto w-full max-w-[13rem] rounded-2xl shadow-md"
           />
-        </div>
-
-        <div className="mb-6 flex flex-col items-center gap-1 text-center">
-          <h1 className="text-xl font-bold tracking-tight text-slate-100">
-            Iniciar sesión
-          </h1>
-          <p className="text-sm font-medium text-slate-400">
-            Sistema de préstamos y recaudos
-          </p>
+          <div className="flex flex-col items-center gap-1">
+            <h1 className="text-xl font-bold tracking-tight text-slate-100">
+              A&G Finanzas
+            </h1>
+            <p className="text-sm font-medium text-slate-400">
+              Iniciar sesión · Préstamos y recaudos
+            </p>
+          </div>
         </div>
 
         {error && (

@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Sistema de PrÃ©stamos",
-  description: "GestiÃ³n de prÃ©stamos, clientes y recaudos",
+  title: "A&G Finanzas",
+  description: "Gestión de préstamos, clientes y recaudos",
 };
 
 export default function RootLayout({ children }: React.PropsWithChildren) {

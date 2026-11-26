@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { Session } from "@supabase/supabase-js";
@@ -54,11 +55,15 @@ export default function Navbar() {
           href="/dashboard"
           className="flex shrink-0 items-center gap-2 font-semibold text-slate-100"
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-400 text-sm font-bold text-white shadow-lg shadow-emerald-950/40">
-            S
-          </span>
-          <span className="hidden whitespace-nowrap sm:block">
-            Sistema de prestamos
+          <Image
+            src="/icon.png"
+            alt="A&G Finanzas"
+            width={36}
+            height={36}
+            className="h-9 w-9 rounded-xl object-cover"
+          />
+          <span className="hidden whitespace-nowrap text-sm font-semibold sm:block">
+            A&G Finanzas
           </span>
         </Link>
 

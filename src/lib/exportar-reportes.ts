@@ -668,6 +668,10 @@ function concatenar(partes: Uint8Array[]): Uint8Array {
 
 export function generarPdf(datos: DatosExportacionReporte): Uint8Array {
   const cursor = new PdfCursor();
+  // Membrete oficial antes del título del reporte.
+  cursor.linea("A&G Finanzas", "F3", 18);
+  cursor.linea("Gestión de préstamos, clientes y recaudos", "F1", 8);
+  cursor.linea("-".repeat(96), "F1", 8);
   cursor.linea(datos.titulo, "F3", 16);
   cursor.linea(`Periodo: ${datos.periodo}`, "F1", 9);
   cursor.linea(`Generado: ${datos.generadoEn} (America/Lima)`, "F1", 9);
