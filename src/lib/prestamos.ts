@@ -1,11 +1,19 @@
-export type Frecuencia = "diario" | "semanal" | "quincenal" | "mensual";
+export type Frecuencia =
+  | "diario"
+  | "semanal"
+  | "quincenal"
+  | "mensual"
+  | "pago_unico";
 
 export const FRECUENCIAS: ReadonlyArray<{ value: Frecuencia; label: string }> = [
   { value: "diario", label: "Diario" },
   { value: "semanal", label: "Semanal" },
   { value: "quincenal", label: "Quincenal" },
   { value: "mensual", label: "Mensual" },
+  { value: "pago_unico", label: "Pago único" },
 ];
+
+export const esPagoUnico = (frecuencia: Frecuencia) => frecuencia === "pago_unico";
 
 export const TASAS_INTERES: readonly number[] = [5, 10, 15, 20];
 
@@ -31,6 +39,9 @@ const redondearHaciaAbajo = (n: number) => Math.floor(n * 100) / 100;
 function sumarPeriodos(fecha: Date, frecuencia: Frecuencia, periodos: number): Date {
   const d = new Date(fecha.getFullYear(), fecha.getMonth(), fecha.getDate());
   switch (frecuencia) {
+    case "pago_unico":
+      // Un pago único vence el día exacto elegido: no se suma ningún periodo.
+      return d;
     case "diario":
       d.setDate(d.getDate() + periodos);
       break;
@@ -57,14 +68,15 @@ export function calcularPrestamo(
   numeroCuotas: number,
   fechaInicio: Date,
 ): PrestamoCalculo {
+  const totalCuotas = esPagoUnico(frecuencia) ? 1 : numeroCuotas;
   const interes = redondear((monto * interesPorcentaje) / 100);
   const montoTotal = redondear(monto + interes);
-  const cuotaBase = redondearHaciaAbajo(montoTotal / numeroCuotas);
-  const ultimaCuota = redondear(montoTotal - cuotaBase * (numeroCuotas - 1));
+  const cuotaBase = redondearHaciaAbajo(montoTotal / totalCuotas);
+  const ultimaCuota = redondear(montoTotal - cuotaBase * (totalCuotas - 1));
 
-  const cuotas: CuotaPreview[] = Array.from({ length: numeroCuotas }, (_, i) => ({
+  const cuotas: CuotaPreview[] = Array.from({ length: totalCuotas }, (_, i) => ({
     numero: i + 1,
-    monto: i + 1 === numeroCuotas ? ultimaCuota : cuotaBase,
+    monto: i + 1 === totalCuotas ? ultimaCuota : cuotaBase,
     fecha: sumarPeriodos(fechaInicio, frecuencia, i + 1),
   }));
 

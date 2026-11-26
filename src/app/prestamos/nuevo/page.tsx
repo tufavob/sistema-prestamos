@@ -11,6 +11,7 @@ import {
 import {
   aYMD,
   calcularPrestamo,
+  esPagoUnico,
   formatearFecha,
   formatearMoneda,
   FRECUENCIAS,
@@ -61,6 +62,8 @@ export default function NuevoPrestamo() {
   const [verificando, setVerificando] = useState<string | null>(null);
   const [saldoPendiente, setSaldoPendiente] = useState(0);
   const [liquidarSaldo, setLiquidarSaldo] = useState(false);
+
+  const pagoUnico = esPagoUnico(frecuencia);
 
   useEffect(() => {
     let activo = true;
@@ -124,7 +127,7 @@ export default function NuevoPrestamo() {
   const calculo = useMemo(() => {
     const m = Number(monto);
     const i = Number(interes);
-    const c = Number(numeroCuotas);
+    const c = pagoUnico ? 1 : Number(numeroCuotas);
     if (
       !Number.isFinite(m) ||
       m <= 0 ||
@@ -140,7 +143,7 @@ export default function NuevoPrestamo() {
     const fecha = new Date(`${fechaInicio}T00:00:00`);
     if (Number.isNaN(fecha.getTime())) return null;
     return calcularPrestamo(m, i, frecuencia, c, fecha);
-  }, [monto, interes, frecuencia, numeroCuotas, fechaInicio]);
+  }, [monto, interes, frecuencia, pagoUnico, numeroCuotas, fechaInicio]);
 
   const seleccionarCliente = async (c: Cliente) => {
     if (!supabase) {
@@ -178,10 +181,13 @@ export default function NuevoPrestamo() {
       e.interes = "Ingresa un porcentaje igual o mayor a cero.";
     else if (aDosDecimales(i) !== i)
       e.interes = "El interés debe tener máximo dos decimales.";
-    const c = Number(numeroCuotas);
-    if (!numeroCuotas || !Number.isInteger(c) || c <= 0 || c > 60)
+    const c = pagoUnico ? 1 : Number(numeroCuotas);
+    if (!pagoUnico && (!numeroCuotas || !Number.isInteger(c) || c <= 0 || c > 60))
       e.cuotas = "Ingresa un número de cuotas entre 1 y 60.";
-    if (!fechaInicio) e.fecha = "Selecciona la fecha de inicio.";
+    if (!fechaInicio)
+      e.fecha = pagoUnico
+        ? "Selecciona la fecha de pago."
+        : "Selecciona la fecha de inicio.";
     if (saldoPendiente > 0 && !liquidarSaldo)
       e.liquidar = `El cliente tiene un saldo pendiente de ${formatearMoneda(
         saldoPendiente,
@@ -211,15 +217,54 @@ export default function NuevoPrestamo() {
       p_monto: aDosDecimales(Number(monto)),
       p_porcentaje_interes: aDosDecimales(Number(interes)),
       p_frecuencia: frecuencia,
-      p_numero_cuotas: Number(numeroCuotas),
+      p_numero_cuotas: pagoUnico ? 1 : Number(numeroCuotas),
       p_fecha_inicio: fechaInicio,
     };
-    const { data, error } = liquidar
-      ? await supabase.rpc("liquidar_y_registrar_prestamo", {
+
+    let data: unknown;
+    let error: { message: string } | null = null;
+    if (liquidar) {
+      const respuesta = await supabase.rpc("liquidar_y_registrar_prestamo", {
+        ...params,
+        p_fecha_liquidacion: aYMD(hoyLocal()),
+      });
+      data = respuesta.data;
+      error = respuesta.error;
+    } else {
+      const respuesta = await supabase.rpc("registrar_prestamo", params);
+      data = respuesta.data;
+      error = respuesta.error;
+
+      // Si la BD aún no acepta 'pago_unico' en su check constraint, se guarda
+      // con una frecuencia existente. En ambos casos se fija la fecha exacta
+      // de la única cuota más abajo.
+      if (
+        error &&
+        pagoUnico &&
+        /frecuencia|23514|check constraint/i.test(error.message)
+      ) {
+        const alternativa = await supabase.rpc("registrar_prestamo", {
           ...params,
-          p_fecha_liquidacion: aYMD(hoyLocal()),
-        })
-      : await supabase.rpc("registrar_prestamo", params);
+          p_frecuencia: "mensual",
+        });
+        data = alternativa.data;
+        error = alternativa.error;
+      }
+
+      if (!error && pagoUnico) {
+        const id = String(data);
+        const ajuste = await supabase
+          .from("cuotas")
+          .update({ fecha_vencimiento: fechaInicio })
+          .eq("prestamo_id", id);
+        if (ajuste.error) {
+          await supabase.from("prestamos").delete().eq("id", id);
+          error = {
+            message: `No se pudo fijar la fecha de pago: ${ajuste.error.message}`,
+          };
+        }
+      }
+    }
     setEnviando(false);
 
     if (error) {
@@ -519,7 +564,12 @@ export default function NuevoPrestamo() {
                   id="frecuencia"
                   className={inputCls}
                   value={frecuencia}
-                  onChange={(e) => setFrecuencia(e.target.value as Frecuencia)}
+                  onChange={(e) => {
+                    const valor = e.target.value as Frecuencia;
+                    setFrecuencia(valor);
+                    setNumeroCuotas(esPagoUnico(valor) ? "1" : "");
+                    setErrors((prev) => ({ ...prev, cuotas: undefined }));
+                  }}
                 >
                   {FRECUENCIAS.map((f) => (
                     <option key={f.value} value={f.value}>
@@ -539,16 +589,26 @@ export default function NuevoPrestamo() {
                   max={60}
                   step={1}
                   placeholder="Ej. 4"
-                  className={inputCls}
-                  value={numeroCuotas}
+                  className={`${inputCls} disabled:cursor-not-allowed disabled:opacity-60`}
+                  value={pagoUnico ? "1" : numeroCuotas}
+                  disabled={pagoUnico}
+                  readOnly={pagoUnico}
                   onChange={(e) => {
                     setNumeroCuotas(e.target.value);
                     setErrors((prev) => ({ ...prev, cuotas: undefined }));
                   }}
                   aria-invalid={Boolean(errors.cuotas)}
                 />
-                {errors.cuotas && (
-                  <p className="mt-1 text-xs text-red-600 dark:text-red-400">{errors.cuotas}</p>
+                {pagoUnico ? (
+                  <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                    Pago único: se genera sola una cuota por el total.
+                  </p>
+                ) : (
+                  errors.cuotas && (
+                    <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                      {errors.cuotas}
+                    </p>
+                  )
                 )}
               </div>
             </div>
@@ -556,7 +616,8 @@ export default function NuevoPrestamo() {
             {/* Fecha de inicio */}
             <div>
               <label htmlFor="fechaInicio" className={labelCls}>
-                Fecha de inicio <span className="text-red-500">*</span>
+                {pagoUnico ? "Fecha de pago (vencimiento)" : "Fecha de inicio"}{" "}
+                <span className="text-red-500">*</span>
               </label>
               <input
                 id="fechaInicio"
@@ -569,6 +630,11 @@ export default function NuevoPrestamo() {
                 }}
                 aria-invalid={Boolean(errors.fecha)}
               />
+              {pagoUnico && (
+                <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                  El capital y el interés se cobran en esta fecha exacta.
+                </p>
+              )}
               {errors.fecha && (
                 <p className="mt-1 text-xs text-red-600 dark:text-red-400">{errors.fecha}</p>
               )}
