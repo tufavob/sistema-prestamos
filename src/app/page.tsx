@@ -1187,38 +1187,66 @@ export default function Home() {
         )}
       </section>
 
-      <Modal open={editando !== null} onClose={cerrarEdicion}>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h3 className="text-lg font-semibold text-slate-100 dark:text-zinc-50">
-              Editar cliente
-            </h3>
-            <p className="mt-1 text-sm text-slate-400 dark:text-slate-400">
-              Actualiza los datos de contacto del cliente.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={cerrarEdicion}
-            aria-label="Cerrar"
-            className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-800/60 hover:text-slate-100 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-          >
-            <svg
-              className="h-5 w-5"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
+      <Modal
+        open={editando !== null}
+        onClose={cerrarEdicion}
+        header={
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-semibold text-slate-100 dark:text-zinc-50">
+                Editar cliente
+              </h3>
+              <p className="mt-1 text-sm text-slate-400 dark:text-slate-400">
+                Actualiza los datos de contacto del cliente.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={cerrarEdicion}
+              aria-label="Cerrar"
+              className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-800/60 hover:text-slate-100 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
             >
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <form onSubmit={guardarEdicion} noValidate className="mt-4 flex flex-col gap-4">
+              <svg
+                className="h-5 w-5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        }
+        footer={
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={cerrarEdicion}
+              className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-800 px-4 text-sm font-semibold text-slate-300 transition hover:bg-slate-800/60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              form="form-editar-cliente"
+              disabled={guardandoEdicion}
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-500 px-5 text-sm font-semibold text-white shadow-lg shadow-emerald-950/40 transition hover:from-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {guardandoEdicion ? "Guardando..." : "Guardar cambios"}
+            </button>
+          </div>
+        }
+      >
+        <form
+          id="form-editar-cliente"
+          onSubmit={guardarEdicion}
+          noValidate
+          className="flex flex-col gap-4"
+        >
           {errorEdicion && (
             <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-200">
               {errorEdicion}
@@ -1407,22 +1435,6 @@ export default function Home() {
             )}
           </div>
 
-          <div className="mt-2 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={cerrarEdicion}
-              className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-800 px-4 text-sm font-semibold text-slate-300 transition hover:bg-slate-800/60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-            >
-              Cancelar
-            </button>
-            <button
-              type="submit"
-              disabled={guardandoEdicion}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-500 px-5 text-sm font-semibold text-white shadow-lg shadow-emerald-950/40 transition hover:from-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {guardandoEdicion ? "Guardando..." : "Guardar cambios"}
-            </button>
-          </div>
         </form>
       </Modal>
 
