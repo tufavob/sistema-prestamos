@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
-import { aYMD, formatearMoneda, hoyLocal } from "@/lib/prestamos";
+import { formatearMoneda } from "@/lib/prestamos";
+import { fechaYMDPeru, hoyPeruYMD } from "@/lib/financiero-core";
 import { crearLinkWhatsApp, mensajeComprobante, mensajeRecordatorio } from "@/lib/whatsapp";
 import { exportarCobrosRutaCSV } from "@/lib/exportar";
 import { registrarCobro } from "@/lib/acciones";
@@ -58,20 +59,8 @@ const formatearDiaMes = (iso: string | null | undefined) => {
 
 const fechaPagoEsHoy = (c: Cobro) => {
   if (!c.fecha_pago) return true;
-  const zonaPeru = { timeZone: "America/Lima" } as const;
-  return (
-    new Date(c.fecha_pago).toLocaleDateString("sv-SE", zonaPeru) ===
-    new Date().toLocaleDateString("sv-SE", zonaPeru)
-  );
+  return fechaYMDPeru(c.fecha_pago) === hoyPeruYMD();
 };
-
-/** Fecha YYYY-MM-DD de un campo `date` de Supabase (evita desfases de zona). */
-const fechaYMD = (iso: string | null | undefined): string =>
-  String(iso ?? "").slice(0, 10);
-
-/** Fecha de hoy en Perú, independiente de la zona del navegador. */
-const hoyPeruYMD = (): string =>
-  new Date().toLocaleDateString("sv-SE", { timeZone: "America/Lima" });
 
 const inputCls =
   "w-full rounded-lg border border-slate-800 bg-slate-950/70 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20";
@@ -218,8 +207,8 @@ export default function Cobros() {
 
   const obtenerCobros = useCallback(async (): Promise<ResultadoCobros | null> => {
     if (!supabase) return null;
-    const hoy = aYMD(hoyLocal());
-    const hoyPeru = new Date().toLocaleDateString("sv-SE", { timeZone: "America/Lima" });
+    const hoy = hoyPeruYMD();
+    const hoyPeru = hoy;
 
     // Toda cuota con saldo pendiente cuyo vencimiento ya llegó (o pasó) debe
     // aparecer en la ruta del día, sin importar el estado del préstamo.
@@ -309,11 +298,7 @@ export default function Cobros() {
       // Respaldo: cuotas marcadas como pagadas hoy.
       for (const raw of (respPagadas.data as unknown as RawCobroPagada[]) ?? []) {
         const fechaPago = raw.fecha_pago ?? raw.updated_at ?? null;
-        const esHoy = fechaPago
-          ? new Date(fechaPago).toLocaleDateString("sv-SE", {
-              timeZone: "America/Lima",
-            }) === hoyPeru
-          : false;
+        const esHoy = fechaPago ? fechaYMDPeru(fechaPago) === hoyPeru : false;
         if (esHoy) {
           recaudadoHoy += Number(raw.monto_pagado ?? raw.monto ?? 0);
           totalCobros += 1;
@@ -325,11 +310,7 @@ export default function Cobros() {
     if (!respPagadas.error) {
       for (const raw of (respPagadas.data as unknown as RawCobroPagada[]) ?? []) {
         const fechaPago = raw.fecha_pago ?? raw.updated_at ?? null;
-        const esHoy = fechaPago
-          ? new Date(fechaPago).toLocaleDateString("sv-SE", {
-              timeZone: "America/Lima",
-            }) === hoyPeru
-          : false;
+        const esHoy = fechaPago ? fechaYMDPeru(fechaPago) === hoyPeru : false;
         if (esHoy) pagadasHoy.push(raw);
       }
     }
@@ -426,7 +407,7 @@ export default function Cobros() {
     const res = await registrarCobro({
       cuotaId: c.id,
       monto: Number(c.saldo_pendiente),
-      fecha: aYMD(hoyLocal()),
+      fecha: hoyPeruYMD(),
     });
     setEnviandoId(null);
     if (!res.ok) {
@@ -475,7 +456,7 @@ export default function Cobros() {
     const res = await registrarCobro({
       cuotaId: c.id,
       monto,
-      fecha: aYMD(hoyLocal()),
+      fecha: hoyPeruYMD(),
     });
     setEnviandoId(null);
     if (!res.ok) {
@@ -508,7 +489,7 @@ export default function Cobros() {
     const montoPagadoCuota = monto - saldo;
     const parcial = c.estado === "parcial";
     const vencida =
-      c.estado === "vencido" || fechaYMD(c.fecha_vencimiento) < hoyPeruYMD();
+      c.estado === "vencido" || fechaYMDPeru(c.fecha_vencimiento) < hoyPeruYMD();
 
     return (
       <div
@@ -629,7 +610,7 @@ export default function Cobros() {
     setExportando(true);
     setErrorGlobal(null);
     try {
-      const fechaISO = fechaHoy || aYMD(hoyLocal());
+      const fechaISO = fechaHoy || hoyPeruYMD();
       const clienteIds = [
         ...new Set(
           cobros
@@ -880,10 +861,10 @@ export default function Cobros() {
             );
             const hoyReferencia = fechaHoy || hoyPeruYMD();
             const vencidas = pendientes.filter(
-              (c) => fechaYMD(c.fecha_vencimiento) < hoyReferencia,
+              (c) => fechaYMDPeru(c.fecha_vencimiento) < hoyReferencia,
             );
             const deHoy = pendientes.filter(
-              (c) => fechaYMD(c.fecha_vencimiento) >= hoyReferencia,
+              (c) => fechaYMDPeru(c.fecha_vencimiento) >= hoyReferencia,
             );
             const totalVencidas = vencidas.reduce(
               (s, c) => s + Number(c.saldo_pendiente ?? 0),
