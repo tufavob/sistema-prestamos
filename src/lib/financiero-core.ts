@@ -457,6 +457,15 @@ const montoProgramadoCuota = (c: CuotaFinanciera): number => {
 const fechaCobroYMD = (pg: PagoFinanciero): string =>
   fechaYMDPeru(pg.created_at) || fechaYMDPeru(pg.fecha_pago);
 
+/**
+ * Fecha real de otorgamiento del préstamo en America/Lima.
+ * `created_at` es la fuente de verdad: en préstamos de `pago_unico`,
+ * `fecha_inicio` es el vencimiento de la única cuota (puede ser futuro y
+ * quedar fuera del rango aunque el préstamo se haya creado dentro de él).
+ */
+export const fechaOtorgamientoPrestamo = (p: PrestamoFinanciero): string =>
+  fechaYMDPeru(p.created_at) || fechaYMDPeru(p.fecha_inicio);
+
 /* ================================================================== */
 /* Cálculos puros (misma matemática para Dashboard y Reportes)         */
 /* ================================================================== */
@@ -899,11 +908,7 @@ export function calcularReporteHistorico(
 
   /* ---------- Capital colocado y movimiento de préstamos ---------- */
   const prestamosRango = prestamos.filter((p) =>
-    entre(
-      fechaYMDPeru(p.fecha_inicio) || fechaYMDPeru(p.created_at),
-      desde,
-      hasta,
-    ),
+    entre(fechaOtorgamientoPrestamo(p), desde, hasta),
   );
   const capitalColocado = r2(
     prestamosRango.reduce((s, p) => s + montoPrestadoDe(p), 0),
@@ -931,13 +936,15 @@ export function calcularReporteHistorico(
   const renovados = prestamosRango.filter((p) => {
     const clienteId = String(p.cliente_id ?? "");
     if (!clienteId) return false;
-    const inicioActual =
-      fechaYMDPeru(p.fecha_inicio) || fechaYMDPeru(p.created_at);
+    const otorgamientoActual = fechaOtorgamientoPrestamo(p);
     return (prestamosPorCliente.get(clienteId) ?? []).some((otro) => {
       if (otro.id === p.id) return false;
-      const inicioOtro =
-        fechaYMDPeru(otro.fecha_inicio) || fechaYMDPeru(otro.created_at);
-      if (!inicioOtro || !inicioActual || inicioOtro >= inicioActual) {
+      const otorgamientoOtro = fechaOtorgamientoPrestamo(otro);
+      if (
+        !otorgamientoOtro ||
+        !otorgamientoActual ||
+        otorgamientoOtro >= otorgamientoActual
+      ) {
         return false;
       }
       const cuotasOtro = cuotasPorPrestamo.get(otro.id) ?? [];
@@ -1127,11 +1134,7 @@ export async function getReportes(
   );
 
   const prestamos7Dias = prestamos.filter((p) =>
-    entre(
-      fechaYMDPeru(p.fecha_inicio) || fechaYMDPeru(p.created_at),
-      inicio7Dias,
-      hoy,
-    ),
+    entre(fechaOtorgamientoPrestamo(p), inicio7Dias, hoy),
   );
   const capitalColocado7 = r2(
     prestamos7Dias.reduce((s, p) => s + montoPrestadoDe(p), 0),
