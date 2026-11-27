@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { LogOut } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 
@@ -88,9 +89,11 @@ export default function Navbar() {
           <button
             type="button"
             onClick={cerrarSesion}
-            className="shrink-0 whitespace-nowrap rounded-lg border border-emerald-600/40 px-3 py-2 text-sm font-medium text-emerald-400 transition hover:bg-emerald-950/40 hover:text-emerald-300"
+            title="Cerrar sesión"
+            aria-label="Cerrar sesión"
+            className="ml-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-600 transition hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
           >
-            Cerrar sesión
+            <LogOut className="h-[18px] w-[18px]" aria-hidden="true" />
           </button>
         )}
       </nav>
