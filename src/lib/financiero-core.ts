@@ -1055,15 +1055,22 @@ export async function getReportes(
 ): Promise<Reportes> {
   const hoy = hoyPeruYMD();
   const inicioSemana = inicioSemanaYMD(hoy);
+  const sabado = sumarDiasYMD(inicioSemana, 5);
+
+  // Rango único de la semana (el mostrado en el subtítulo). La consulta de
+  // pagos se amplía para seguir alimentando el reporte diario de "hoy".
   const inicio7Dias = sumarDiasYMD(hoy, -6);
-  const finVentana = sumarDiasYMD(hoy, 1);
+  const finHoy = sumarDiasYMD(hoy, 1);
+  const finSemana = sumarDiasYMD(sabado, 1);
+  const desdeConsulta = inicioSemana < inicio7Dias ? inicioSemana : inicio7Dias;
+  const hastaConsulta = finHoy > finSemana ? finHoy : finSemana;
 
   const [pagosRes, prestamosRes, cuotasRes] = await Promise.all([
     supabase
       .from("pagos")
       .select("*")
-      .gte("created_at", `${inicio7Dias}T00:00:00-05:00`)
-      .lt("created_at", `${finVentana}T00:00:00-05:00`),
+      .gte("created_at", `${desdeConsulta}T00:00:00-05:00`)
+      .lt("created_at", `${hastaConsulta}T00:00:00-05:00`),
     supabase.from("prestamos").select("*"),
     supabase.from("cuotas").select("*"),
   ]);
@@ -1079,7 +1086,6 @@ export async function getReportes(
   const cuotas = (cuotasRes.data ?? []) as unknown as CuotaFinanciera[];
 
   const prestamoPorId = new Map(prestamos.map((p) => [p.id, p]));
-  const cuotaPorId = new Map(cuotas.map((c) => [c.id, c]));
 
   /* ---------- Métricas base compartidas ---------- */
   const caja = calcularCajaHoy(pagos, hoy);
@@ -1106,14 +1112,20 @@ export async function getReportes(
   };
 
   /* ---------- 2) Reporte semanal ---------- */
-  const sabado = sumarDiasYMD(inicioSemana, 5);
-
-  const pagosSemana = pagos.filter((pg) =>
-    entre(fechaCobroYMD(pg), inicioSemana, sabado),
+  // Misma ventana y misma matemática que el reporte histórico: evita que
+  // "Capital colocado" quede desalineado con el subtítulo lunes–sábado.
+  const resumenSemana = calcularReporteHistorico(
+    prestamos,
+    cuotas,
+    pagos,
+    inicioSemana,
+    sabado,
+    hoy,
   );
-  const recaudadoSemana = r2(
-    pagosSemana.reduce((s, pg) => s + Number(pg.monto ?? 0), 0),
-  );
+  const recaudadoSemana = resumenSemana.recaudado;
+  const capitalRecuperadoSemana = resumenSemana.capitalRecuperado;
+  const capitalColocadoSemana = resumenSemana.capitalColocado;
+  const prestamosColocadosSemana = resumenSemana.prestamosColocados;
 
   const proyectadoSemana = r2(
     cuotas
@@ -1121,23 +1133,6 @@ export async function getReportes(
         entre(fechaYMDPeru(c.fecha_vencimiento), inicioSemana, sabado),
       )
       .reduce((s, c) => s + montoProgramadoCuota(c), 0),
-  );
-
-  const pagos7Dias = pagos.filter((pg) =>
-    entre(fechaCobroYMD(pg), inicio7Dias, hoy),
-  );
-  const capitalRecuperado7 = r2(
-    pagos7Dias.reduce(
-      (s, pg) => s + detallePago(pg, cuotaPorId, prestamoPorId).capital,
-      0,
-    ),
-  );
-
-  const prestamos7Dias = prestamos.filter((p) =>
-    entre(fechaOtorgamientoPrestamo(p), inicio7Dias, hoy),
-  );
-  const capitalColocado7 = r2(
-    prestamos7Dias.reduce((s, p) => s + montoPrestadoDe(p), 0),
   );
 
   const DIAS_SEMANA = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
@@ -1209,9 +1204,9 @@ export async function getReportes(
       proyectadoSemana > 0
         ? r2((recaudadoSemana / proyectadoSemana) * 100)
         : 0,
-    capitalColocado: capitalColocado7,
-    capitalRecuperado: capitalRecuperado7,
-    prestamosColocados: prestamos7Dias.length,
+    capitalColocado: capitalColocadoSemana,
+    capitalRecuperado: capitalRecuperadoSemana,
+    prestamosColocados: prestamosColocadosSemana,
     dias,
     tramos: tramosBase.map((t) => ({
       clave: t.clave,

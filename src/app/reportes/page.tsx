@@ -364,7 +364,7 @@ function SeccionSemanal({
           valor={formatearMoneda(s.capitalColocado)}
           detalle={`${s.prestamosColocados} ${
             s.prestamosColocados === 1 ? "préstamo" : "préstamos"
-          } · últimos 7 días`}
+          } · ${formatearRangoFechas(s.desde, s.hasta)}`}
           tono="blue"
           icono={IconoSube}
           cargando={cargando}
@@ -372,7 +372,10 @@ function SeccionSemanal({
         <TarjetaKPI
           titulo="Capital recuperado"
           valor={formatearMoneda(s.capitalRecuperado)}
-          detalle="Amortización cobrada · últimos 7 días"
+          detalle={`Amortización cobrada · ${formatearRangoFechas(
+            s.desde,
+            s.hasta,
+          )}`}
           tono="indigo"
           icono={IconoBaja}
           cargando={cargando}
