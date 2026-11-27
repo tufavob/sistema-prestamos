@@ -3,7 +3,7 @@
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
-import { aYMD, formatearMoneda, FRECUENCIAS, hoyLocal, type Frecuencia } from "@/lib/prestamos";
+import { aYMD, formatearMoneda, labelFrecuencia, hoyLocal, type Frecuencia } from "@/lib/prestamos";
 import { MEDIOS_DE_PAGO, type MedioPago } from "@/lib/credito";
 import BadgeCalificacion from "@/components/BadgeCalificacion";
 
@@ -52,9 +52,6 @@ type ResultadoDetalle = {
 
 const primero = <T,>(x: T | T[] | null | undefined): T | null =>
   Array.isArray(x) ? (x[0] ?? null) : (x ?? null);
-
-const labelFrecuencia = (f: string) =>
-  FRECUENCIAS.find((x) => x.value === f)?.label ?? f;
 
 const formatearFechaDB = (s: string) => {
   const [y, m, d] = s.split("-").map(Number);

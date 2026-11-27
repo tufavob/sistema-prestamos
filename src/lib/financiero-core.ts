@@ -403,6 +403,50 @@ export const montoPendienteCuota = (c: CuotaFinanciera): number => {
   return Number(c.monto ?? 0);
 };
 
+/**
+ * Saldo real de un préstamo activo.
+ * Las cuotas son la fuente de verdad: en la BD real `prestamos.saldo_pendiente`
+ * puede quedar en 0 aunque las cuotas estén pendientes (p. ej. pago único).
+ * Se tolera cualquier estado de cuota escrito con otro casing.
+ */
+const saldoPendientePrestamo = (
+  p: PrestamoFinanciero,
+  cuotasPorPrestamo: Map<string, CuotaFinanciera[]>,
+): number => {
+  const total = montoTotalDe(p);
+  const tope = total > 0 ? total : Number.POSITIVE_INFINITY;
+  const cuotas = cuotasPorPrestamo.get(String(p.id ?? ""));
+
+  if (cuotas && cuotas.length > 0) {
+    const pendiente = cuotas
+      .filter((c) => !esCuotaPagada(c))
+      .reduce((suma, c) => suma + montoPendienteCuota(c), 0);
+    return r2(Math.min(pendiente, tope));
+  }
+
+  const directo = Number(p.saldo_pendiente ?? 0);
+  if (Number.isFinite(directo) && directo > 0) {
+    return r2(Math.min(directo, tope));
+  }
+  // Sin cuotas cargadas: un préstamo activo se considera íntegramente pendiente.
+  return r2(total > 0 ? total : 0);
+};
+
+/** Mapa de cuotas por préstamo, reutilizado por cartera y segmentos. */
+const indexarCuotasPorPrestamo = (
+  cuotas: CuotaFinanciera[],
+): Map<string, CuotaFinanciera[]> => {
+  const mapa = new Map<string, CuotaFinanciera[]>();
+  for (const c of cuotas) {
+    const id = String(c.prestamo_id ?? "");
+    if (!id) continue;
+    const lista = mapa.get(id) ?? [];
+    lista.push(c);
+    mapa.set(id, lista);
+  }
+  return mapa;
+};
+
 /** Monto programado de una cuota (para proyecciones semanales). */
 const montoProgramadoCuota = (c: CuotaFinanciera): number => {
   const monto = Number(c.monto ?? 0);
@@ -435,16 +479,19 @@ export function calcularCajaHoy(
 /** b) Cartera activa: capital principal + ganancia proyectada. */
 export function calcularCarteraActiva(
   prestamos: PrestamoFinanciero[],
+  cuotas: CuotaFinanciera[] = [],
 ): MetricaCarteraActiva {
   let capitalPrincipal = 0;
   let gananciaProyectada = 0;
   let prestamosActivos = 0;
 
+  const cuotasPorPrestamo = indexarCuotasPorPrestamo(cuotas);
+
   for (const p of prestamos) {
     if (!esPrestamoActivo(p)) continue;
     prestamosActivos += 1;
 
-    const saldo = Number(p.saldo_pendiente ?? 0);
+    const saldo = saldoPendientePrestamo(p, cuotasPorPrestamo);
     if (!Number.isFinite(saldo) || saldo <= 0) continue;
 
     const capital = montoPrestadoDe(p);
@@ -577,14 +624,19 @@ export async function getMetricasCajaHoy(
 export async function getMetricasCarteraActiva(
   supabase: SupabaseClient,
 ): Promise<MetricaCarteraActiva> {
-  const { data, error } = await supabase
-    .from("prestamos")
-    .select("*")
-    .eq("estado", "activo");
+  // Se consultan también las cuotas: son la fuente de verdad del saldo cuando
+  // `prestamos.saldo_pendiente` no fue actualizado por la RPC (caso pago_unico).
+  const [prestamosRes, cuotasRes] = await Promise.all([
+    supabase.from("prestamos").select("*").ilike("estado", "activo"),
+    supabase.from("cuotas").select("*"),
+  ]);
 
-  if (error) throw errorConsulta(error.message);
+  const primerError = prestamosRes.error ?? cuotasRes.error;
+  if (primerError) throw errorConsulta(primerError.message);
+
   return calcularCarteraActiva(
-    (data ?? []) as unknown as PrestamoFinanciero[],
+    (prestamosRes.data ?? []) as unknown as PrestamoFinanciero[],
+    (cuotasRes.data ?? []) as unknown as CuotaFinanciera[],
   );
 }
 
@@ -599,7 +651,7 @@ export async function getMetricasMoraVencida(
       .select("*")
       .neq("estado", "pagado")
       .lt("fecha_vencimiento", hoy),
-    supabase.from("prestamos").select("*").eq("estado", "activo"),
+    supabase.from("prestamos").select("*").ilike("estado", "activo"),
   ]);
 
   const primerError = cuotasRes.error ?? prestamosRes.error;
@@ -623,7 +675,7 @@ export async function getCuotasProgramadasHoy(
       .select("*")
       .neq("estado", "pagado")
       .eq("fecha_vencimiento", hoy),
-    supabase.from("prestamos").select("*").eq("estado", "activo"),
+    supabase.from("prestamos").select("*").ilike("estado", "activo"),
   ]);
 
   const primerError = cuotasRes.error ?? prestamosRes.error;
@@ -674,7 +726,7 @@ const calcularSegmentosCartera = (
 
   for (const p of prestamos) {
     if (!esPrestamoActivo(p)) continue;
-    const saldo = Number(p.saldo_pendiente ?? 0);
+    const saldo = saldoPendientePrestamo(p, cuotasPorPrestamo);
     if (!Number.isFinite(saldo) || saldo <= 0) continue;
 
     const vencidas = (cuotasPorPrestamo.get(p.id) ?? []).filter((c) => {
@@ -902,7 +954,7 @@ export function calcularReporteHistorico(
     baseTasa > 0 ? r2((renovados / baseTasa) * 100) : 0;
 
   /* ---------- Foto actual de cartera y mora ---------- */
-  const cartera = calcularCarteraActiva(prestamos);
+  const cartera = calcularCarteraActiva(prestamos, cuotas);
   const mora = calcularMoraVencida(prestamos, cuotas, hoy);
 
   return {

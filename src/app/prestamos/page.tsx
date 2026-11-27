@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
-import { formatearMoneda, FRECUENCIAS, type Frecuencia } from "@/lib/prestamos";
+import { formatearMoneda, labelFrecuencia, type Frecuencia } from "@/lib/prestamos";
 import { recalcularCalificaciones } from "@/lib/clientes";
 import BadgeCalificacion from "@/components/BadgeCalificacion";
 
@@ -47,9 +47,6 @@ const primero = <T,>(x: T | T[] | null | undefined): T | null =>
   Array.isArray(x) ? (x[0] ?? null) : (x ?? null);
 
 const nombreCompleto = (c: ClientePrestamo) => `${c.nombres} ${c.apellidos}`;
-
-const labelFrecuencia = (f: string) =>
-  FRECUENCIAS.find((x) => x.value === f)?.label ?? f;
 
 const TITULOS_FILTRO: Record<TipoFiltro, string> = {
   activos: "Activos",

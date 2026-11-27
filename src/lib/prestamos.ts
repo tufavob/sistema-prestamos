@@ -15,6 +15,21 @@ export const FRECUENCIAS: ReadonlyArray<{ value: Frecuencia; label: string }> = 
 
 export const esPagoUnico = (frecuencia: Frecuencia) => frecuencia === "pago_unico";
 
+/** Etiqueta única para mostrar la frecuencia en toda la app (nunca el valor crudo). */
+export const labelFrecuencia = (frecuencia: string | null | undefined): string => {
+  const valor = String(frecuencia ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (valor === "pago_unico" || valor === "pago_unica" || valor === "unico") {
+    return "Pago único";
+  }
+  return (
+    FRECUENCIAS.find((f) => f.value === valor)?.label ??
+    String(frecuencia ?? "")
+  );
+};
+
 export const TASAS_INTERES: readonly number[] = [5, 10, 15, 20];
 
 export type CuotaPreview = {

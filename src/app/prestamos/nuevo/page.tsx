@@ -15,6 +15,7 @@ import {
   formatearFecha,
   formatearMoneda,
   FRECUENCIAS,
+  labelFrecuencia,
   TASAS_INTERES,
   hoyLocal,
   type Frecuencia,
@@ -702,7 +703,7 @@ export default function NuevoPrestamo() {
                 </div>
                 <div className="rounded-xl bg-slate-950/70 p-4">
                   <dt className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">
-                    Cuota ({FRECUENCIAS.find((f) => f.value === frecuencia)?.label.toLowerCase()})
+                    Cuota ({labelFrecuencia(frecuencia).toLowerCase()})
                   </dt>
                   <dd className="mt-1 text-lg font-semibold text-slate-100">
                     {formatearMoneda(calculo.cuotaBase)}
