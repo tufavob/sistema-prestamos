@@ -73,6 +73,14 @@ export type MetricaCuotasHoy = {
   clientesHoyIds: string[];
 };
 
+export type MetricaProximosVencimientos = {
+  desde: string;
+  hasta: string;
+  montoProximo: number;
+  totalCuotas: number;
+  clientesUnicos: number;
+};
+
 /* ================================================================== */
 /* Resultados de reportes                                              */
 /* ================================================================== */
@@ -210,6 +218,16 @@ const diasEntreYMD = (desde: string, hasta: string): number => {
   const a = Date.UTC(y1, m1 - 1, d1);
   const b = Date.UTC(y2, m2 - 1, d2);
   return Math.round((b - a) / 86_400_000);
+};
+
+/** Días de atraso de una cuota vencida, en calendario de Perú. */
+export const diasAtrasoYMD = (
+  vencimiento: string | null | undefined,
+  hoy = hoyPeruYMD(),
+): number => {
+  const venc = fechaYMDPeru(vencimiento);
+  if (!venc) return 0;
+  return Math.max(0, diasEntreYMD(venc, hoy));
 };
 
 /**
@@ -447,13 +465,6 @@ const indexarCuotasPorPrestamo = (
   return mapa;
 };
 
-/** Monto programado de una cuota (para proyecciones semanales). */
-const montoProgramadoCuota = (c: CuotaFinanciera): number => {
-  const monto = Number(c.monto ?? 0);
-  if (monto > 0) return monto;
-  return montoPendienteCuota(c);
-};
-
 const fechaCobroYMD = (pg: PagoFinanciero): string =>
   fechaYMDPeru(pg.created_at) || fechaYMDPeru(pg.fecha_pago);
 
@@ -606,6 +617,46 @@ export function calcularCuotasProgramadasHoy(
   };
 }
 
+/** Cuotas impagas que vencen en los próximos `dias` (sin contar hoy). */
+export function calcularProximosVencimientos(
+  prestamos: PrestamoFinanciero[],
+  cuotas: CuotaFinanciera[],
+  hoy = hoyPeruYMD(),
+  dias = 7,
+): MetricaProximosVencimientos {
+  const desde = sumarDiasYMD(hoy, 1);
+  const hasta = sumarDiasYMD(hoy, dias);
+  const activos = new Set(
+    prestamos.filter(esPrestamoActivo).map((p) => p.id),
+  );
+  const prestamoPorId = new Map(prestamos.map((p) => [p.id, p]));
+  const clientes = new Set<string>();
+  let montoProximo = 0;
+  let totalCuotas = 0;
+
+  for (const c of cuotas) {
+    if (esCuotaPagada(c)) continue;
+    if (!activos.has(String(c.prestamo_id ?? ""))) continue;
+    const vencimiento = fechaYMDPeru(c.fecha_vencimiento);
+    if (!entre(vencimiento, desde, hasta)) continue;
+
+    totalCuotas += 1;
+    montoProximo += montoPendienteCuota(c);
+    const clienteId = String(
+      prestamoPorId.get(String(c.prestamo_id ?? ""))?.cliente_id ?? "",
+    );
+    if (clienteId) clientes.add(clienteId);
+  }
+
+  return {
+    desde,
+    hasta,
+    montoProximo: r2(montoProximo),
+    totalCuotas,
+    clientesUnicos: clientes.size,
+  };
+}
+
 /* ================================================================== */
 /* Funciones async base (consultas a Supabase)                         */
 /* ================================================================== */
@@ -694,6 +745,35 @@ export async function getCuotasProgramadasHoy(
     (prestamosRes.data ?? []) as unknown as PrestamoFinanciero[],
     (cuotasRes.data ?? []) as unknown as CuotaFinanciera[],
     hoy,
+  );
+}
+
+/** e) Próximos vencimientos (siguientes 7 días, sin contar hoy). */
+export async function getProximosVencimientos(
+  supabase: SupabaseClient,
+  hoy = hoyPeruYMD(),
+  dias = 7,
+): Promise<MetricaProximosVencimientos> {
+  const desde = sumarDiasYMD(hoy, 1);
+  const hasta = sumarDiasYMD(hoy, dias);
+  const [cuotasRes, prestamosRes] = await Promise.all([
+    supabase
+      .from("cuotas")
+      .select("*")
+      .neq("estado", "pagado")
+      .gte("fecha_vencimiento", desde)
+      .lte("fecha_vencimiento", hasta),
+    supabase.from("prestamos").select("*").ilike("estado", "activo"),
+  ]);
+
+  const primerError = cuotasRes.error ?? prestamosRes.error;
+  if (primerError) throw errorConsulta(primerError.message);
+
+  return calcularProximosVencimientos(
+    (prestamosRes.data ?? []) as unknown as PrestamoFinanciero[],
+    (cuotasRes.data ?? []) as unknown as CuotaFinanciera[],
+    hoy,
+    dias,
   );
 }
 
@@ -1127,12 +1207,17 @@ export async function getReportes(
   const capitalColocadoSemana = resumenSemana.capitalColocado;
   const prestamosColocadosSemana = resumenSemana.prestamosColocados;
 
+  const prestamosActivosIds = new Set(
+    prestamos.filter(esPrestamoActivo).map((p) => p.id),
+  );
   const proyectadoSemana = r2(
     cuotas
-      .filter((c) =>
-        entre(fechaYMDPeru(c.fecha_vencimiento), inicioSemana, sabado),
-      )
-      .reduce((s, c) => s + montoProgramadoCuota(c), 0),
+      .filter((c) => {
+        if (esCuotaPagada(c)) return false;
+        if (!prestamosActivosIds.has(String(c.prestamo_id ?? ""))) return false;
+        return entre(fechaYMDPeru(c.fecha_vencimiento), inicioSemana, sabado);
+      })
+      .reduce((s, c) => s + montoPendienteCuota(c), 0),
   );
 
   const DIAS_SEMANA = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];

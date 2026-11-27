@@ -53,6 +53,22 @@ export async function recalcularCalificaciones(
   }
 }
 
+/** Recalcula la calificación de un cliente sin tocar los demás. */
+export async function recalcularCalificacionCliente(
+  supabase: SupabaseClient,
+  clienteId: string,
+): Promise<void> {
+  if (!clienteId) return;
+  const { error } = await supabase.rpc("recalcular_calificacion_cliente", {
+    p_cliente_id: clienteId,
+  });
+  if (error) {
+    console.warn(
+      `No se pudo recalcular la calificación del cliente ${clienteId}: ${error.message}`,
+    );
+  }
+}
+
 export async function obtenerResumenCliente(
   supabase: SupabaseClient,
   clienteId: string,

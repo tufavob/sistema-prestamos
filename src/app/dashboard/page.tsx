@@ -7,9 +7,11 @@ import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { formatearMoneda } from "@/lib/prestamos";
 import {
   formatearFechaLarga,
+  getCuotasProgramadasHoy,
   getMetricasCajaHoy,
   getMetricasCarteraActiva,
   getMetricasMoraVencida,
+  getProximosVencimientos,
   hoyPeruYMD,
 } from "@/lib/financiero-core";
 
@@ -30,6 +32,14 @@ type Metricas = {
   montoTotalMora: number;
   clientesMorososUnicos: number;
   totalCuotasVencidas: number;
+  montoProgramadoHoy: number;
+  totalCuotasHoy: number;
+  clientesHoyUnicos: number;
+  proximoDesde: string;
+  proximoHasta: string;
+  montoProximo: number;
+  totalCuotasProximas: number;
+  clientesProximosUnicos: number;
 };
 
 /* ------------------------------------------------------------------ */
@@ -42,10 +52,12 @@ const obtenerMetricas = async (): Promise<Metricas | string> => {
   }
 
   try {
-    const [caja, cartera, mora] = await Promise.all([
+    const [caja, cartera, mora, hoy, proximos] = await Promise.all([
       getMetricasCajaHoy(supabase),
       getMetricasCarteraActiva(supabase),
       getMetricasMoraVencida(supabase),
+      getCuotasProgramadasHoy(supabase),
+      getProximosVencimientos(supabase),
     ]);
 
     return {
@@ -59,6 +71,14 @@ const obtenerMetricas = async (): Promise<Metricas | string> => {
       montoTotalMora: mora.montoTotalMora,
       clientesMorososUnicos: mora.clientesMorososUnicos,
       totalCuotasVencidas: mora.totalCuotasVencidas,
+      montoProgramadoHoy: hoy.montoProgramadoHoy,
+      totalCuotasHoy: hoy.totalCuotasHoy,
+      clientesHoyUnicos: hoy.clientesHoyUnicos,
+      proximoDesde: proximos.desde,
+      proximoHasta: proximos.hasta,
+      montoProximo: proximos.montoProximo,
+      totalCuotasProximas: proximos.totalCuotas,
+      clientesProximosUnicos: proximos.clientesUnicos,
     };
   } catch (e) {
     return e instanceof Error
@@ -378,6 +398,43 @@ export default function Dashboard() {
           icono={IconoAlerta}
           cargando={cargando}
         />
+      </section>
+
+      {/* Vencimientos: hoy y siguientes 7 días (incluye pago único) */}
+      <section
+        aria-label="Próximos vencimientos"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2"
+      >
+        <div className="rounded-2xl border border-emerald-500/20 bg-slate-900/80 p-5 shadow-lg shadow-slate-950/30">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-400/90">
+            Cuotas que vencen hoy
+          </p>
+          <p className="mt-2 text-2xl font-bold tracking-tight text-emerald-300 tabular-nums">
+            {formatearMoneda(metricas?.montoProgramadoHoy ?? 0)}
+          </p>
+          <p className="mt-1 text-xs text-slate-400">
+            {metricas?.totalCuotasHoy ?? 0} cuota
+            {(metricas?.totalCuotasHoy ?? 0) === 1 ? "" : "s"} ·{" "}
+            {metricas?.clientesHoyUnicos ?? 0} cliente
+            {(metricas?.clientesHoyUnicos ?? 0) === 1 ? "" : "s"}
+          </p>
+        </div>
+
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-lg shadow-slate-950/30">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+            Próximos vencimientos
+          </p>
+          <p className="mt-2 text-2xl font-bold tracking-tight text-slate-100 tabular-nums">
+            {formatearMoneda(metricas?.montoProximo ?? 0)}
+          </p>
+          <p className="mt-1 text-xs text-slate-400">
+            {metricas?.totalCuotasProximas ?? 0} cuota
+            {(metricas?.totalCuotasProximas ?? 0) === 1 ? "" : "s"} ·{" "}
+            {metricas?.clientesProximosUnicos ?? 0} cliente
+            {(metricas?.clientesProximosUnicos ?? 0) === 1 ? "" : "s"} ·{" "}
+            {metricas?.proximoDesde ?? ""} al {metricas?.proximoHasta ?? ""}
+          </p>
+        </div>
       </section>
 
       {/* Banner inferior: valor total de cartera activa */}

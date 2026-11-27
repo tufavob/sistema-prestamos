@@ -3,8 +3,11 @@
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
-import { aYMD, formatearMoneda, labelFrecuencia, hoyLocal, type Frecuencia } from "@/lib/prestamos";
+import { formatearMoneda, labelFrecuencia, type Frecuencia } from "@/lib/prestamos";
 import { MEDIOS_DE_PAGO, type MedioPago } from "@/lib/credito";
+import { hoyPeruYMD } from "@/lib/financiero-core";
+import { recalcularCalificacionCliente } from "@/lib/clientes";
+import { registrarCobro } from "@/lib/acciones";
 import BadgeCalificacion from "@/components/BadgeCalificacion";
 
 const supabase = hasAuthConfig ? createClient() : null;
@@ -113,6 +116,18 @@ export default function DetallePrestamo({
     .map((c) => c.fecha_vencimiento)
     .sort()[0];
 
+  const actualizarCalificacion = useCallback(async () => {
+    if (!supabase || !id) return;
+    const { data } = await supabase
+      .from("prestamos")
+      .select("cliente_id")
+      .eq("id", id)
+      .maybeSingle();
+    if (data?.cliente_id) {
+      await recalcularCalificacionCliente(supabase, String(data.cliente_id));
+    }
+  }, [id]);
+
   const obtenerDatos = useCallback(async (): Promise<ResultadoDetalle | null> => {
     if (!supabase || !id) return null;
     const [prestamoRes, cuotasRes] = await Promise.all([
@@ -154,6 +169,7 @@ export default function DetallePrestamo({
   useEffect(() => {
     let activo = true;
     const iniciar = async () => {
+      await actualizarCalificacion();
       const res = await obtenerDatos();
       if (!activo || !res) return;
       if (res.error) {
@@ -170,9 +186,10 @@ export default function DetallePrestamo({
     return () => {
       activo = false;
     };
-  }, [obtenerDatos]);
+  }, [actualizarCalificacion, obtenerDatos]);
 
   const refrescar = async () => {
+    await actualizarCalificacion();
     const res = await obtenerDatos();
     if (!res) return;
     if (res.error) {
@@ -192,88 +209,23 @@ export default function DetallePrestamo({
     setError(null);
     setEnviandoCuota(cuota.id);
     try {
-      const montoCuota = Number(cuota.monto);
-      const hoy = aYMD(hoyLocal());
-      const medioPago = mediosPago[cuota.id] ?? "efectivo";
-
-      // 1) Marcar la cuota como pagada guardando el método de pago.
-      const baseCuota = {
-        estado: "pagado",
-        monto_pagado: montoCuota,
-        saldo_pendiente: 0,
-        fecha_pago: hoy,
-      };
-      let { error: errorCuota } = await supabase
-        .from("cuotas")
-        .update({ ...baseCuota, metodo_pago: medioPago })
-        .eq("id", cuota.id);
-      if (
-        errorCuota &&
-        /column|does not exist|metodo_pago/i.test(errorCuota.message)
-      ) {
-        const reintento = await supabase
-          .from("cuotas")
-          .update(baseCuota)
-          .eq("id", cuota.id);
-        errorCuota = reintento.error;
-      }
-
-      if (errorCuota) {
-        setError(`No se pudo actualizar la cuota: ${errorCuota.message}`);
+      const saldoCuota = Number(
+        cuota.saldo_pendiente ??
+          Math.max(0, Number(cuota.monto) - Number(cuota.monto_pagado ?? 0)),
+      );
+      if (saldoCuota <= 0) {
+        setError("La cuota ya está pagada.");
         return;
       }
 
-      // 2) Registrar el pago en `pagos`.
-      const basePago = {
-        cuota_id: cuota.id,
-        monto: montoCuota,
-        fecha_pago: hoy,
-      };
-      const { error: errorPago } = await supabase.from("pagos").insert({
-        ...basePago,
-        medio_pago: medioPago,
-        es_abono_parcial: false,
+      const resultado = await registrarCobro({
+        cuotaId: cuota.id,
+        monto: saldoCuota,
+        fecha: hoyPeruYMD(),
+        medioPago: mediosPago[cuota.id] ?? "efectivo",
       });
-      if (
-        errorPago &&
-        /column|does not exist|es_abono_parcial|medio_pago/i.test(errorPago.message)
-      ) {
-        const { error: errorPagoBase } = await supabase.from("pagos").insert(basePago);
-        if (errorPagoBase) {
-          setError(
-            `La cuota quedó pagada, pero no se pudo registrar en "pagos": ${errorPagoBase.message}`,
-          );
-          return;
-        }
-      } else if (errorPago) {
-        setError(
-          `La cuota quedó pagada, pero no se pudo registrar en "pagos": ${errorPago.message}`,
-        );
-        return;
-      }
-
-      // 3) Recalcular el saldo del préstamo y finalizarlo cuando llega a 0.
-      const saldoRestante = cuotas
-        .filter(
-          (c) =>
-            c.id !== cuota.id && c.estado.toLowerCase() !== "pagado",
-        )
-        .reduce(
-          (acc, c) => acc + (Number(c.monto) - Number(c.monto_pagado ?? 0)),
-          0,
-        );
-      const actualizacionPrestamo: Record<string, string | number> = {
-        saldo_pendiente: Math.max(0, saldoRestante),
-      };
-      if (saldoRestante <= 0) actualizacionPrestamo.estado = "finalizado";
-      const { error: errorPrestamo } = await supabase
-        .from("prestamos")
-        .update(actualizacionPrestamo)
-        .eq("id", id);
-      if (errorPrestamo) {
-        setError(
-          `La cuota quedó pagada, pero no se pudo actualizar el préstamo: ${errorPrestamo.message}`,
-        );
+      if (!resultado.ok) {
+        setError(`No se pudo registrar el pago: ${resultado.error}`);
         return;
       }
 

@@ -1,4 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  diasAtrasoYMD,
+  fechaYMDPeru,
+  hoyPeruYMD,
+} from "@/lib/financiero-core";
 
 export type Calificacion =
   | "nuevo"
@@ -58,21 +63,19 @@ export const esMedioPago = (v: string): v is MedioPago =>
 const redondear = (n: number): number => Math.round(n * 100) / 100;
 
 /**
- * Calificación dinámica según la puntualidad promedio del historial:
- * - Excelente (verde): 0 días de retraso promedio (pagos a tiempo o adelantados).
- * - Bueno (azul): promedio de 1 día de retraso (>= 1 y < 2).
- * - Regular (naranja): promedio de 2 a 4 días de retraso.
- * - Deficiente (rojo): promedio de 5+ días de retraso o deuda morosa (cuotas
- *   vencidas sin cobrar).
+ * Calificación compatible con el motor real de Supabase
+ * (`calcular_calificacion_cliente`): `nuevo`, `bueno` o `deficiente`.
+ * Un pago puntual —incluido uno de `pago_unico`— deja de ser `nuevo`.
+ * No se filtra por frecuencia: todos los préstamos cuentan igual.
  */
 export function calcularCalificacion(
   diasRetrasoPromedio: number,
   morosidad: boolean,
+  tieneHistorial = true,
 ): Calificacion {
   if (morosidad || diasRetrasoPromedio >= 5) return "deficiente";
-  if (diasRetrasoPromedio >= 2) return "regular";
-  if (diasRetrasoPromedio >= 1) return "bueno";
-  return "excelente";
+  if (!tieneHistorial) return "nuevo";
+  return "bueno";
 }
 
 type RawClienteRef = { cliente_id: string };
@@ -103,22 +106,14 @@ type RawPagoHistorial = {
 const primero = <T,>(x: T | T[] | null | undefined): T | null =>
   Array.isArray(x) ? (x[0] ?? null) : (x ?? null);
 
-function aYMDLocal(fecha: Date): string {
-  const y = fecha.getFullYear();
-  const m = String(fecha.getMonth() + 1).padStart(2, "0");
-  const d = String(fecha.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
 function diasRetraso(
   fechaPago: string | null | undefined,
   vencimiento: string | null | undefined,
 ): number {
-  if (!fechaPago || !vencimiento) return 0;
-  const p = Date.parse(fechaPago);
-  const v = Date.parse(vencimiento);
-  if (!Number.isFinite(p) || !Number.isFinite(v)) return 0;
-  return Math.max(0, Math.round((p - v) / 86_400_000));
+  const venc = fechaYMDPeru(vencimiento);
+  const pago = fechaYMDPeru(fechaPago);
+  if (!venc || !pago) return 0;
+  return diasAtrasoYMD(venc, pago);
 }
 
 function acumuladorVacio() {
@@ -147,7 +142,7 @@ export async function obtenerScoresClientes(
   >();
   for (const id of limpios) acumuladores.set(id, acumuladorVacio());
 
-  const hoy = aYMDLocal(new Date());
+  const hoy = hoyPeruYMD();
 
   const [respCuotas, respPagosBase, respPrestamos] = await Promise.all([
     supabase
@@ -190,10 +185,11 @@ export async function obtenerScoresClientes(
       const acc = acumuladores.get(ref.cliente_id);
       if (!acc) continue;
       // Deuda morosa: cuota sin cobrar cuyo vencimiento ya pasó.
+      const vencimiento = fechaYMDPeru(raw.fecha_vencimiento);
       if (
         String(raw.estado ?? "").toLowerCase() !== "pagado" &&
-        raw.fecha_vencimiento &&
-        raw.fecha_vencimiento < hoy
+        vencimiento &&
+        vencimiento < hoy
       ) {
         acc.morosidad = true;
       }
@@ -221,7 +217,11 @@ export async function obtenerScoresClientes(
       const acc = acumuladores.get(raw.cliente_id);
       if (!acc) continue;
       const estado = (raw.estado ?? "").toLowerCase();
-      if (estado === "liquidado" || estado === "cancelado") {
+      if (
+        estado === "completado" ||
+        estado === "liquidado" ||
+        estado === "cancelado"
+      ) {
         acc.refinanciado += 1;
       }
     }
@@ -232,7 +232,11 @@ export async function obtenerScoresClientes(
     const diasRetrasoPromedio =
       acc.nPagos > 0 ? redondear(acc.sumaRetrasos / acc.nPagos) : 0;
     scores.set(id, {
-      calificacion: calcularCalificacion(diasRetrasoPromedio, acc.morosidad),
+      calificacion: calcularCalificacion(
+        diasRetrasoPromedio,
+        acc.morosidad,
+        acc.nPagos > 0,
+      ),
       diasRetrasoPromedio,
       diasMaximoAtraso: acc.maxAtraso,
       atrasos: acc.atrasos,

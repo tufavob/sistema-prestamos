@@ -5,7 +5,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient, hasAuthConfig } from "@/lib/supabase";
 import { formatearMoneda } from "@/lib/prestamos";
-import { fechaYMDPeru, hoyPeruYMD } from "@/lib/financiero-core";
+import {
+  diasAtrasoYMD,
+  fechaYMDPeru,
+  hoyPeruYMD,
+} from "@/lib/financiero-core";
 import { crearLinkWhatsApp, mensajeComprobante, mensajeRecordatorio } from "@/lib/whatsapp";
 import { exportarCobrosRutaCSV } from "@/lib/exportar";
 import { registrarCobro } from "@/lib/acciones";
@@ -58,7 +62,7 @@ const formatearDiaMes = (iso: string | null | undefined) => {
 };
 
 const fechaPagoEsHoy = (c: Cobro) => {
-  if (!c.fecha_pago) return true;
+  if (!c.fecha_pago) return false;
   return fechaYMDPeru(c.fecha_pago) === hoyPeruYMD();
 };
 
@@ -488,8 +492,11 @@ export default function Cobros() {
     const monto = Number(c.monto);
     const montoPagadoCuota = monto - saldo;
     const parcial = c.estado === "parcial";
-    const vencida =
-      c.estado === "vencido" || fechaYMDPeru(c.fecha_vencimiento) < hoyPeruYMD();
+    const diasAtraso = diasAtrasoYMD(
+      c.fecha_vencimiento,
+      fechaHoy || hoyPeruYMD(),
+    );
+    const vencida = c.estado === "vencido" || diasAtraso > 0;
 
     return (
       <div
@@ -506,7 +513,7 @@ export default function Cobros() {
             {formatearFechaDB(c.fecha_vencimiento)}
             {vencida && (
               <span className="ml-2 rounded-full bg-red-950/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400">
-                Vencida
+                Vencida{diasAtraso > 0 ? ` · ${diasAtraso} día${diasAtraso === 1 ? "" : "s"}` : ""}
               </span>
             )}
           </p>

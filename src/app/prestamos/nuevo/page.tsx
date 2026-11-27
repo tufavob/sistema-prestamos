@@ -9,7 +9,6 @@ import {
   type Cliente,
 } from "@/lib/supabase";
 import {
-  aYMD,
   calcularPrestamo,
   esPagoUnico,
   formatearFecha,
@@ -17,9 +16,10 @@ import {
   FRECUENCIAS,
   labelFrecuencia,
   TASAS_INTERES,
-  hoyLocal,
   type Frecuencia,
 } from "@/lib/prestamos";
+import { hoyPeruYMD } from "@/lib/financiero-core";
+import { registrarPrestamo } from "@/lib/acciones";
 
 const supabase = hasAuthConfig ? createClient() : null;
 
@@ -53,7 +53,7 @@ export default function NuevoPrestamo() {
   const [interes, setInteres] = useState("20");
   const [frecuencia, setFrecuencia] = useState<Frecuencia>("mensual");
   const [numeroCuotas, setNumeroCuotas] = useState("");
-  const [fechaInicio, setFechaInicio] = useState(aYMD(hoyLocal()));
+  const [fechaInicio, setFechaInicio] = useState(hoyPeruYMD());
 
   const [errors, setErrors] = useState<FormErrors>({});
   const [enviando, setEnviando] = useState(false);
@@ -213,75 +213,19 @@ export default function NuevoPrestamo() {
     setEnviando(true);
     setErrorGlobal(null);
     const liquidar = liquidarSaldo && saldoPendiente > 0;
-    const params = {
-      p_cliente_id: clienteSeleccionado.id,
-      p_monto: aDosDecimales(Number(monto)),
-      p_porcentaje_interes: aDosDecimales(Number(interes)),
-      p_frecuencia: frecuencia,
-      p_numero_cuotas: pagoUnico ? 1 : Number(numeroCuotas),
-      p_fecha_inicio: fechaInicio,
-    };
-
-    let data: unknown;
-    let error: { message: string } | null = null;
-    if (liquidar) {
-      const respuesta = await supabase.rpc("liquidar_y_registrar_prestamo", {
-        ...params,
-        p_fecha_liquidacion: aYMD(hoyLocal()),
-      });
-      data = respuesta.data;
-      error = respuesta.error;
-    } else {
-      const respuesta = await supabase.rpc("registrar_prestamo", params);
-      data = respuesta.data;
-      error = respuesta.error;
-
-      // Si la BD aún no acepta 'pago_unico' en su check constraint, se guarda
-      // con una frecuencia existente. En ambos casos se fija la fecha exacta
-      // de la única cuota más abajo.
-      if (
-        error &&
-        pagoUnico &&
-        /frecuencia|23514|check constraint/i.test(error.message)
-      ) {
-        const alternativa = await supabase.rpc("registrar_prestamo", {
-          ...params,
-          p_frecuencia: "mensual",
-        });
-        data = alternativa.data;
-        error = alternativa.error;
-      }
-
-      if (!error && pagoUnico) {
-        const id = String(data);
-        const ajuste = await supabase
-          .from("cuotas")
-          .update({ fecha_vencimiento: fechaInicio })
-          .eq("prestamo_id", id);
-        if (ajuste.error) {
-          await supabase.from("prestamos").delete().eq("id", id);
-          error = {
-            message: `No se pudo fijar la fecha de pago: ${ajuste.error.message}`,
-          };
-        }
-      }
-    }
+    const resultado = await registrarPrestamo({
+      clienteId: clienteSeleccionado.id,
+      monto: aDosDecimales(Number(monto)),
+      porcentajeInteres: aDosDecimales(Number(interes)),
+      frecuencia,
+      numeroCuotas: pagoUnico ? 1 : Number(numeroCuotas),
+      fechaInicio,
+      liquidarSaldo: liquidar,
+    });
     setEnviando(false);
 
-    if (error) {
-      if (error.message.toLowerCase().includes("vigente")) {
-        setErrorGlobal(
-          `El cliente tiene un préstamo vigente con cuotas pendientes. Marca la casilla "Amortizar saldo anterior" para renovarlo.`,
-        );
-      } else {
-        setErrorGlobal(
-          `No se pudo generar el préstamo: ${error.message}${
-            error.message.toLowerCase().includes("function")
-              ? " Asegúrate de ejecutar la migración SQL en supabase/migrations."
-              : ""
-          }`,
-        );
-      }
+    if (!resultado.ok) {
+      setErrorGlobal(`No se pudo generar el préstamo: ${resultado.error}`);
       return;
     }
 
@@ -289,13 +233,13 @@ export default function NuevoPrestamo() {
       liquidar
         ? `Préstamo generado y saldo anterior amortizado para ${nombreCompleto(
             clienteSeleccionado,
-          )} (ID: ${String(data).slice(0, 8)}…).`
-        : `Préstamo generado correctamente para ${nombreCompleto(clienteSeleccionado)} (ID: ${String(data).slice(0, 8)}…).`,
+          )} (ID: ${resultado.id.slice(0, 8)}…).`
+        : `Préstamo generado correctamente para ${nombreCompleto(clienteSeleccionado)} (ID: ${resultado.id.slice(0, 8)}…).`,
     );
     setMonto("");
     setInteres("");
     setNumeroCuotas("");
-    setFechaInicio(aYMD(hoyLocal()));
+    setFechaInicio(hoyPeruYMD());
     setClienteSeleccionado(null);
     setSaldoPendiente(0);
     setLiquidarSaldo(false);

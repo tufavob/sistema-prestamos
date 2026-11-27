@@ -2,10 +2,24 @@
 
 import { revalidatePath } from "next/cache";
 import { createServerSupabase, hasAuthConfig } from "@/lib/supabase-server";
+import { aYMD, calcularPrestamo, type Frecuencia } from "@/lib/prestamos";
+import { hoyPeruYMD } from "@/lib/financiero-core";
 
 export type ResultadoCobro =
   | { ok: true; error: null }
   | { ok: false; error: string };
+
+export type ResultadoPrestamo =
+  | { ok: true; error: null; id: string }
+  | { ok: false; error: string };
+
+const FRECUENCIAS_VALIDAS: readonly Frecuencia[] = [
+  "diario",
+  "semanal",
+  "quincenal",
+  "mensual",
+  "pago_unico",
+];
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -13,12 +27,7 @@ const FECHA_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DIAS_ATRASO_MAXIMO = 90;
 
 function hoyEnLima(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Lima",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
+  return hoyPeruYMD();
 }
 
 function validarFecha(s: string): string | null {
@@ -35,11 +44,327 @@ function redondear(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+function fechaYMDValida(s: string): boolean {
+  if (!FECHA_RE.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  const fecha = new Date(y, m - 1, d);
+  return (
+    fecha.getFullYear() === y &&
+    fecha.getMonth() === m - 1 &&
+    fecha.getDate() === d
+  );
+}
+
+function fechaDesdeYMD(s: string): Date {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function esCuotaPagadaBD(estado: string | null | undefined): boolean {
+  return ["pagado", "pagada", "liquidado", "cancelado", "anulado"].includes(
+    String(estado ?? "").trim().toLowerCase(),
+  );
+}
+
+function pendienteDeCuotaBD(c: {
+  monto?: number | null;
+  monto_pagado?: number | null;
+  saldo_pendiente?: number | null;
+}): number {
+  const saldo = Number(c.saldo_pendiente ?? 0);
+  if (Number.isFinite(saldo) && saldo > 0) return redondear(saldo);
+  return Math.max(
+    0,
+    redondear(Number(c.monto ?? 0) - Number(c.monto_pagado ?? 0)),
+  );
+}
+
 function traducirError(mensaje: string): string {
   const msg = mensaje.toLowerCase();
   if (msg.includes("row-level security") || msg.includes("permission denied"))
     return "Tu sesión expiró o no tienes permisos. Vuelve a iniciar sesión.";
   return mensaje;
+}
+
+/**
+ * Alta de préstamos sin depender de RPC ausentes en la BD real.
+ * Soporta `pago_unico` (una sola cuota en la fecha exacta) y la amortización
+ * previa opcional, dejando constantes `prestamos`, `cuotas` y `pagos`.
+ */
+export async function registrarPrestamo(input: {
+  clienteId: string;
+  monto: number;
+  porcentajeInteres: number;
+  frecuencia: Frecuencia;
+  numeroCuotas: number;
+  fechaInicio: string;
+  liquidarSaldo?: boolean;
+}): Promise<ResultadoPrestamo> {
+  if (!hasAuthConfig) {
+    return { ok: false, error: "Supabase no configurado" };
+  }
+  if (!UUID_RE.test(input.clienteId)) {
+    return { ok: false, error: "Identificador de cliente inválido." };
+  }
+
+  const monto = redondear(Number(input.monto));
+  const porcentajeInteres = redondear(Number(input.porcentajeInteres));
+  if (!Number.isFinite(monto) || monto <= 0 || aDosDecimales(monto) !== monto) {
+    return {
+      ok: false,
+      error: "El monto debe ser un número mayor a cero con máximo dos decimales.",
+    };
+  }
+  if (
+    !Number.isFinite(porcentajeInteres) ||
+    porcentajeInteres < 0 ||
+    aDosDecimales(porcentajeInteres) !== porcentajeInteres
+  ) {
+    return {
+      ok: false,
+      error: "El interés debe ser un número válido con máximo dos decimales.",
+    };
+  }
+  if (!FRECUENCIAS_VALIDAS.includes(input.frecuencia)) {
+    return { ok: false, error: "La frecuencia seleccionada no es válida." };
+  }
+  const numeroCuotas =
+    input.frecuencia === "pago_unico" ? 1 : Math.trunc(Number(input.numeroCuotas));
+  if (!Number.isInteger(numeroCuotas) || numeroCuotas < 1 || numeroCuotas > 60) {
+    return { ok: false, error: "Ingresa un número de cuotas entre 1 y 60." };
+  }
+  if (!fechaYMDValida(input.fechaInicio)) {
+    return { ok: false, error: "La fecha de pago/inicio no es válida." };
+  }
+
+  const supabase = await createServerSupabase();
+
+  const { data: cliente, error: errorCliente } = await supabase
+    .from("clientes")
+    .select("id")
+    .eq("id", input.clienteId)
+    .maybeSingle();
+  if (errorCliente) {
+    return { ok: false, error: traducirError(errorCliente.message) };
+  }
+  if (!cliente) {
+    return { ok: false, error: "El cliente seleccionado ya no existe." };
+  }
+
+  const hoy = hoyPeruYMD();
+  const pagosLiquidacion: string[] = [];
+  const cuotasLiquidacion: Array<{
+    id: string;
+    estado: string | null;
+    monto_pagado: number | null;
+    saldo_pendiente: number | null;
+    fecha_pago: string | null;
+  }> = [];
+  const prestamosLiquidacion: Array<{
+    id: string;
+    estado: string | null;
+    saldo_pendiente: number | null;
+  }> = [];
+
+  const revertirLiquidacion = async () => {
+    if (pagosLiquidacion.length > 0) {
+      await supabase.from("pagos").delete().in("id", pagosLiquidacion);
+    }
+    for (const c of cuotasLiquidacion) {
+      await supabase
+        .from("cuotas")
+        .update({
+          estado: c.estado,
+          monto_pagado: c.monto_pagado,
+          saldo_pendiente: c.saldo_pendiente,
+          fecha_pago: c.fecha_pago,
+        })
+        .eq("id", c.id);
+    }
+    for (const p of prestamosLiquidacion) {
+      await supabase
+        .from("prestamos")
+        .update({
+          estado: p.estado ?? "activo",
+          saldo_pendiente: p.saldo_pendiente ?? 0,
+        })
+        .eq("id", p.id);
+    }
+  };
+
+  if (input.liquidarSaldo) {
+    const { data: prestamosPrevios, error: errorPrestamosPrevios } = await supabase
+      .from("prestamos")
+      .select("id, estado, saldo_pendiente")
+      .eq("cliente_id", input.clienteId);
+    if (errorPrestamosPrevios) {
+      return {
+        ok: false,
+        error: traducirError(errorPrestamosPrevios.message),
+      };
+    }
+
+    const idsPrevios = (prestamosPrevios ?? []).map((p) => String(p.id));
+    if (idsPrevios.length > 0) {
+      const { data: cuotasPrevias, error: errorCuotasPrevias } = await supabase
+        .from("cuotas")
+        .select(
+          "id, prestamo_id, monto, monto_pagado, saldo_pendiente, estado, fecha_pago",
+        )
+        .in("prestamo_id", idsPrevios)
+        .neq("estado", "pagado");
+      if (errorCuotasPrevias) {
+        return {
+          ok: false,
+          error: traducirError(errorCuotasPrevias.message),
+        };
+      }
+
+      for (const c of cuotasPrevias ?? []) {
+        const saldo = pendienteDeCuotaBD(c);
+        if (saldo <= 0) continue;
+        const pagoId = crypto.randomUUID();
+        const { error: errorPago } = await supabase.from("pagos").insert({
+          id: pagoId,
+          cuota_id: c.id,
+          monto: saldo,
+          metodo_pago: "efectivo",
+          fecha_pago: hoy,
+          es_abono_parcial: false,
+        });
+        if (errorPago) {
+          await revertirLiquidacion();
+          return {
+            ok: false,
+            error: `No se pudo amortizar el saldo anterior: ${traducirError(errorPago.message)}`,
+          };
+        }
+        pagosLiquidacion.push(pagoId);
+
+        const { error: errorCuota } = await supabase
+          .from("cuotas")
+          .update({
+            estado: "pagado",
+            monto_pagado: redondear(Number(c.monto ?? 0)),
+            saldo_pendiente: 0,
+            fecha_pago: hoy,
+            metodo_pago: "efectivo",
+          })
+          .eq("id", c.id);
+        if (errorCuota) {
+          await revertirLiquidacion();
+          return {
+            ok: false,
+            error: `No se pudo amortizar el saldo anterior: ${traducirError(errorCuota.message)}`,
+          };
+        }
+        cuotasLiquidacion.push({
+          id: String(c.id),
+          estado: c.estado ?? null,
+          monto_pagado: c.monto_pagado ?? null,
+          saldo_pendiente: c.saldo_pendiente ?? null,
+          fecha_pago: c.fecha_pago ?? null,
+        });
+      }
+
+      for (const p of prestamosPrevios ?? []) {
+        const { error: errorPrestamo } = await supabase
+          .from("prestamos")
+          .update({ estado: "completado", saldo_pendiente: 0 })
+          .eq("id", p.id);
+        if (errorPrestamo) {
+          await revertirLiquidacion();
+          return {
+            ok: false,
+            error: `No se pudo amortizar el saldo anterior: ${traducirError(errorPrestamo.message)}`,
+          };
+        }
+        prestamosLiquidacion.push({
+          id: String(p.id),
+          estado: p.estado ?? null,
+          saldo_pendiente: p.saldo_pendiente ?? null,
+        });
+      }
+    }
+  }
+
+  const calculo = calcularPrestamo(
+    monto,
+    porcentajeInteres,
+    input.frecuencia,
+    numeroCuotas,
+    fechaDesdeYMD(input.fechaInicio),
+  );
+  const prestamoId = crypto.randomUUID();
+  const { error: errorNuevo } = await supabase.from("prestamos").insert({
+    id: prestamoId,
+    cliente_id: input.clienteId,
+    monto_prestado: monto,
+    porcentaje_interes: porcentajeInteres,
+    monto_total: calculo.montoTotal,
+    frecuencia: input.frecuencia,
+    fecha_inicio: input.fechaInicio,
+    estado: "activo",
+    numero_cuotas: numeroCuotas,
+    saldo_pendiente: calculo.montoTotal,
+    casa_propia: false,
+    deudas_otras_entidades: null,
+  });
+
+  if (errorNuevo) {
+    await revertirLiquidacion();
+    return {
+      ok: false,
+      error: `No se pudo generar el préstamo: ${traducirError(errorNuevo.message)}`,
+    };
+  }
+
+  const { error: errorCuotas } = await supabase.from("cuotas").insert(
+    calculo.cuotas.map((c) => ({
+      id: crypto.randomUUID(),
+      prestamo_id: prestamoId,
+      monto: c.monto,
+      fecha_vencimiento: aYMD(c.fecha),
+      estado: "pendiente",
+      monto_pagado: 0,
+      numero_cuota: c.numero,
+      saldo_pendiente: c.monto,
+      fecha_pago: null,
+      metodo_pago: "efectivo",
+    })),
+  );
+
+  if (errorCuotas) {
+    await supabase.from("prestamos").delete().eq("id", prestamoId);
+    await revertirLiquidacion();
+    return {
+      ok: false,
+      error: `No se pudo generar el cronograma: ${traducirError(errorCuotas.message)}`,
+    };
+  }
+
+  const { error: errorCalificacion } = await supabase.rpc(
+    "recalcular_calificacion_cliente",
+    { p_cliente_id: input.clienteId },
+  );
+  if (errorCalificacion) {
+    console.warn(
+      `No se pudo recalcular la calificación del cliente: ${errorCalificacion.message}`,
+    );
+  }
+
+  revalidatePath("/reportes");
+  revalidatePath("/dashboard");
+  revalidatePath("/prestamos");
+  revalidatePath("/prestamos/nuevo");
+  revalidatePath("/cobros");
+  revalidatePath("/");
+
+  return { ok: true, error: null, id: prestamoId };
+}
+
+function aDosDecimales(n: number): number {
+  return redondear(n);
 }
 
 export async function registrarCobro(input: {
@@ -71,7 +396,7 @@ export async function registrarCobro(input: {
   const { data: cuota, error: errorLectura } = await supabase
     .from("cuotas")
     .select(
-      "prestamo_id, monto, monto_pagado, saldo_pendiente, estado, fecha_pago, prestamos(saldo_pendiente)",
+      "prestamo_id, monto, monto_pagado, saldo_pendiente, estado, fecha_pago, prestamos(saldo_pendiente, estado, cliente_id)",
     )
     .eq("id", input.cuotaId)
     .maybeSingle();
@@ -107,77 +432,41 @@ export async function registrarCobro(input: {
       ? input.medioPago
       : "efectivo";
 
-  // 2) Registrar PRIMERO el ingreso en `pagos`. La tabla solo acepta
-  //    id, cuota_id, monto, metodo_pago y fecha_pago; NO se envía
-  //    prestamo_id ni cliente_id. Se prueban variantes por compatibilidad
-  //    entre entornos (metodo_pago/medio_pago y fecha_pago date/timestamptz).
-  const fechaPagoISO = new Date().toISOString();
-  const fechaPagoPeru = hoyEnLima();
+  // 2) Registrar PRIMERO el ingreso en `pagos`. La BD real usa `metodo_pago`
+  //    y `fecha_pago DATE`; se conservan variantes por compatibilidad con
+  //    esquemas anteriores. La fecha es la validada en zona Perú (nunca UTC).
+  const fechaPago = input.fecha;
+  const fechaPagoISO = `${fechaPago}T12:00:00-05:00`;
   const montoPago = redondear(input.monto);
+  const esAbonoParcial = estadoFinal === "parcial";
   const medioPagoEtiqueta =
     medioPago.charAt(0).toUpperCase() + medioPago.slice(1);
   const pagoId = crypto.randomUUID();
+  const basePago = {
+    id: pagoId,
+    cuota_id: input.cuotaId,
+    monto: montoPago,
+    es_abono_parcial: esAbonoParcial,
+  };
 
-  const variantesPago: Record<string, string | number>[] = [
+  const variantesPago: Record<string, string | number | boolean>[] = [
+    { ...basePago, metodo_pago: medioPago, fecha_pago: fechaPago },
+    { ...basePago, medio_pago: medioPago, fecha_pago: fechaPago },
+    { ...basePago, metodo_pago: medioPago, fecha_pago: fechaPagoISO },
+    { ...basePago, medio_pago: medioPago, fecha_pago: fechaPagoISO },
     {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-      metodo_pago: medioPago,
-      fecha_pago: fechaPagoISO,
+      ...basePago,
+      metodo_pago: medioPagoEtiqueta,
+      fecha_pago: fechaPago,
     },
     {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-      medio_pago: medioPago,
-      fecha_pago: fechaPagoISO,
-    },
-    {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-      metodo_pago: medioPago,
-      fecha_pago: fechaPagoPeru,
-    },
-    {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-      medio_pago: medioPago,
-      fecha_pago: fechaPagoPeru,
-    },
-    {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
+      ...basePago,
       metodo_pago: medioPagoEtiqueta,
       fecha_pago: fechaPagoISO,
     },
-    {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-      metodo_pago: medioPagoEtiqueta,
-      fecha_pago: fechaPagoPeru,
-    },
-    {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-      fecha_pago: fechaPagoISO,
-    },
-    {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-      fecha_pago: fechaPagoPeru,
-    },
-    {
-      id: pagoId,
-      cuota_id: input.cuotaId,
-      monto: montoPago,
-    },
+    { ...basePago, fecha_pago: fechaPago },
+    { ...basePago, fecha_pago: fechaPagoISO },
+    { ...basePago },
   ];
 
   let errorPago: { message: string } | null = null;
@@ -213,7 +502,7 @@ export async function registrarCobro(input: {
     saldo_pendiente: saldoCuota,
   };
   if (estadoFinal === "pagado") {
-    actualizacion.fecha_pago = new Date().toISOString();
+    actualizacion.fecha_pago = fechaPago;
   }
 
   let { error: errorCuota } = await supabase
@@ -250,39 +539,37 @@ export async function registrarCobro(input: {
     };
   }
 
-  // 4) Descontar el saldo del préstamo y recalcular su estado según las
-  //    cuotas reales. El estado NO se infiere del saldo: mientras exista
-  //    alguna cuota con estado distinto de 'pagado' (incluye abonos
-  //    'parcial'), el préstamo sigue 'activo'. Solo cuando quedan 0 cuotas
-  //    sin pagar se marca 'completado'.
+  // 4) Recalcular el saldo denormalizado del préstamo desde las cuotas.
+  //    Esto corrige el caso `pago_unico` cuyo saldo nació en 0: un abono
+  //    parcial debe dejar el saldo real pendiente, y solo se marca
+  //    'completado' cuando no queda ninguna cuota sin pagar.
   const prestamoId = cuota.prestamo_id;
   const prestamos = Array.isArray(cuota.prestamos)
     ? cuota.prestamos[0]
     : cuota.prestamos;
-  const saldoPrestamo = Number(prestamos?.saldo_pendiente ?? 0);
-  const nuevoSaldoPrestamo = Math.max(
-    0,
-    redondear(saldoPrestamo - input.monto),
-  );
-  const actualizacionPrestamo: Record<string, string | number> = {
-    saldo_pendiente: nuevoSaldoPrestamo,
-  };
+  const saldoPrestamoAnterior = Number(prestamos?.saldo_pendiente ?? 0);
+  const estadoPrestamoAnterior = String(prestamos?.estado ?? "activo");
 
   let errorPrestamo: { message: string } | null = null;
-  const { count: cuotasSinPagar, error: errorConteo } = await supabase
+  const { data: cuotasPrestamo, error: errorCuotasPrestamo } = await supabase
     .from("cuotas")
-    .select("id", { count: "exact", head: true })
-    .eq("prestamo_id", prestamoId)
-    .neq("estado", "pagado");
+    .select("estado, monto, monto_pagado, saldo_pendiente")
+    .eq("prestamo_id", prestamoId);
 
-  if (errorConteo) {
-    errorPrestamo = errorConteo;
+  if (errorCuotasPrestamo) {
+    errorPrestamo = errorCuotasPrestamo;
   } else {
-    actualizacionPrestamo.estado =
-      cuotasSinPagar === 0 ? "completado" : "activo";
+    const saldoCalculado = redondear(
+      (cuotasPrestamo ?? [])
+        .filter((c) => !esCuotaPagadaBD(c.estado))
+        .reduce((total, c) => total + pendienteDeCuotaBD(c), 0),
+    );
     const { error } = await supabase
       .from("prestamos")
-      .update(actualizacionPrestamo)
+      .update({
+        saldo_pendiente: saldoCalculado,
+        estado: saldoCalculado <= 0 ? "completado" : "activo",
+      })
       .eq("id", prestamoId);
     errorPrestamo = error;
   }
@@ -298,6 +585,13 @@ export async function registrarCobro(input: {
         fecha_pago: fechaPagoAnterior,
       })
       .eq("id", input.cuotaId);
+    const { error: errorReversionPrestamo } = await supabase
+      .from("prestamos")
+      .update({
+        saldo_pendiente: saldoPrestamoAnterior,
+        estado: estadoPrestamoAnterior,
+      })
+      .eq("id", prestamoId);
     const { data: revertidos, error: errorReversionPago } = await supabase
       .from("pagos")
       .delete()
@@ -305,12 +599,14 @@ export async function registrarCobro(input: {
       .select("id");
     if (
       errorReversionCuota ||
+      errorReversionPrestamo ||
       errorReversionPago ||
       !revertidos ||
       revertidos.length === 0
     ) {
       console.error("No se pudo revertir la operación completa:", {
         cuota: errorReversionCuota?.message,
+        prestamo: errorReversionPrestamo?.message,
         pago:
           errorReversionPago?.message ??
           (revertidos && revertidos.length === 0
@@ -324,6 +620,19 @@ export async function registrarCobro(input: {
     };
   }
 
+  const clienteId = String(prestamos?.cliente_id ?? "");
+  if (clienteId) {
+    const { error: errorCalificacion } = await supabase.rpc(
+      "recalcular_calificacion_cliente",
+      { p_cliente_id: clienteId },
+    );
+    if (errorCalificacion) {
+      console.warn(
+        `No se pudo recalcular la calificación del cliente: ${errorCalificacion.message}`,
+      );
+    }
+  }
+
   revalidatePath("/reportes");
   revalidatePath("/dashboard");
   revalidatePath("/prestamos");
@@ -333,4 +642,3 @@ export async function registrarCobro(input: {
 
   return { ok: true, error: null };
 }
-  // ensure cache
